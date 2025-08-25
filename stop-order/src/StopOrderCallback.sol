@@ -182,7 +182,7 @@ contract StopOrderCallback is AbstractCallback {
     
     /*
      * @notice Executes a stop order (called by RSC)
-     * @dev REMOVED ALL THRESHOLD CHECKING - WE TRUST THE RSC COMPLETELY
+     * @dev Includes an on-chain price check as a final safeguard before execution.
      * @param sender The address triggering the execution
      * @param orderId The ID of the order to execute
      */
@@ -192,11 +192,19 @@ contract StopOrderCallback is AbstractCallback {
     ) external authorizedSenderOnly validOrder(orderId) {
         StopOrder storage order = stopOrders[orderId];
         
-        // ONLY CHECK: Order status - NO PRICE VALIDATION!
+        // Check order status
         if (order.status != OrderStatus.Active) {
             emit ExecutionFailed(orderId, "Order is not active");
             return;
         }
+
+        // While the RSC triggers this call, we perform a final on-chain check
+        // to ensure the price condition is met at the moment of execution.
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(order.pair).getReserves();
+        require(
+            _isBelowThreshold(order.sellToken0, reserve0, reserve1, order.coefficient, order.threshold),
+            "Price condition not met"
+        );
         
         // Check retry cooldown
         if (order.lastExecutionAttempt > 0 && 
@@ -214,11 +222,6 @@ contract StopOrderCallback is AbstractCallback {
         // Update execution attempt
         order.lastExecutionAttempt = block.timestamp;
         order.retryCount++;
-        
-        // REMOVED: Threshold checking - RSC is our authoritative price oracle!
-        // NO MORE: _isBelowThreshold() calls
-        // NO MORE: "Price above threshold" failures
-        // The RSC has already validated the price condition!
         
         // Check user still has sufficient balance and allowance
         uint256 userBalance = IERC20(order.tokenSell).balanceOf(order.client);
@@ -238,7 +241,7 @@ contract StopOrderCallback is AbstractCallback {
             return;
         }
         
-        // Execute the swap - NO ADDITIONAL PRICE VALIDATION!
+        // Execute the swap
         bool success = _executeSwap(order, executeAmount);
         
         if (success) {
@@ -348,60 +351,68 @@ contract StopOrderCallback is AbstractCallback {
         }
     }
     
-    // Internal functions
-    // SOLUTIONS:
-// 1. Use require() instead of try/catch
-// 2. Follow proven pattern: swap to contract first, then transfer
-// 3. Simple, reliable error handling
-
-function _executeSwap(StopOrder memory order, uint256 amount) internal returns (bool) {
-    address tokenSell = order.tokenSell;
-    address tokenBuy = order.tokenBuy;
-    address client = order.client;
     
-    // Validate first
-    uint256 clientBalance = IERC20(tokenSell).balanceOf(client);
-    if (clientBalance < amount) return false;
-    
-    uint256 allowance = IERC20(tokenSell).allowance(client, address(this));
-    if (allowance < amount) return false;
-    
-    // Step 1: Transfer tokens from client to contract
-    require(IERC20(tokenSell).transferFrom(client, address(this), amount), "Transfer failed");
-    
-    // Step 2: Approve router
-    require(IERC20(tokenSell).approve(address(router), amount), "Approval failed");
-    
-    // Step 3: Execute swap TO CONTRACT FIRST
-    address[] memory path = new address[](2);
-    path[0] = tokenSell;
-    path[1] = tokenBuy;
-    
-    uint256[] memory amounts = router.swapExactTokensForTokens(
-        amount,
-        0,
-        path,
-        address(this), // ✅ SOLUTION: Receive at contract first
-        block.timestamp + DEADLINE_OFFSET
-    );
-    
-    // Step 4: Transfer received tokens to client
-    uint256 amountOut = amounts[1];
-    require(IERC20(tokenBuy).transfer(client, amountOut), "Final transfer failed");
-    
-    return true;
-}
-    
-
-    // The RSC is our single source of truth for price conditions
-    
-    // Emergency functions
-    function withdrawETH() external {
-        require(msg.sender == tx.origin, "Only EOA can withdraw"); // Simple access control
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No ETH to withdraw");
+    function _executeSwap(StopOrder memory order, uint256 amount) internal returns (bool) {
+        address tokenSell = order.tokenSell;
+        address tokenBuy = order.tokenBuy;
+        address client = order.client;
         
-        (bool success,) = msg.sender.call{value: balance}("");
-        require(success, "ETH transfer failed");
+        // Validate first
+        uint256 clientBalance = IERC20(tokenSell).balanceOf(client);
+        if (clientBalance < amount) return false;
+        
+        uint256 allowance = IERC20(tokenSell).allowance(client, address(this));
+        if (allowance < amount) return false;
+        
+        // Step 1: Transfer tokens from client to contract
+        require(IERC20(tokenSell).transferFrom(client, address(this), amount), "Transfer failed");
+        
+        // Step 2: Approve router
+        require(IERC20(tokenSell).approve(address(router), amount), "Approval failed");
+        
+        // Step 3: Execute swap TO CONTRACT FIRST
+        address[] memory path = new address[](2);
+        path[0] = tokenSell;
+        path[1] = tokenBuy;
+        
+        uint256[] memory amounts = router.swapExactTokensForTokens(
+            amount,
+            0,
+            path,
+            address(this),
+            block.timestamp + DEADLINE_OFFSET
+        );
+        
+        // Step 4: Transfer received tokens to client
+        uint256 amountOut = amounts[1];
+        require(IERC20(tokenBuy).transfer(client, amountOut), "Final transfer failed");
+        
+        return true;
     }
+    
+    /**
+     * @notice Checks if the current on-chain price is below the order's threshold.
+     * @param sellToken0 True if selling token0, false if selling token1.
+     * @param reserve0 The reserve of token0 in the pair.
+     * @param reserve1 The reserve of token1 in the pair.
+     * @param coefficient The price coefficient from the order.
+     * @param threshold The price threshold from the order.
+     * @return True if the price condition is met, false otherwise.
+     */
+    function _isBelowThreshold(
+        bool sellToken0,
+        uint112 reserve0,
+        uint112 reserve1,
+        uint256 coefficient,
+        uint256 threshold
+    ) internal pure returns (bool) {
+        if (sellToken0) {
+            // Price of token0 in terms of token1
+            return (uint256(reserve1) * coefficient) / uint256(reserve0) <= threshold;
+        } else {
+            // Price of token1 in terms of token0
+            return (uint256(reserve0) * coefficient) / uint256(reserve1) <= threshold;
+        }
+    }
+    
 }
