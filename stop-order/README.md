@@ -1,83 +1,82 @@
-# Uniswap V2 Stop Order System with RSC
+# Uniswap V2 Stop Order System with Reactive Smart Contracts
 
-This project provides an automated stop order system for Uniswap V2 using Reactive Smart Contracts (RSC). The system allows users to create stop orders that automatically execute token swaps when price thresholds are reached, without requiring manual intervention.
+This project provides an automated stop order system for Uniswap V2 using Reactive Smart Contracts (RSC). The system allows users to create multiple stop orders within a single deployment that automatically execute token swaps when price thresholds are reached, without requiring manual intervention.
 
 ## How It Works - The Complete Flow
 
-This system creates a seamless stop order experience:
+This system creates a seamless multi-order stop order experience:
 
-1. **Order Creation on Sepolia**:
-   - Users create stop orders on the Sepolia chain
-   - Orders include token pair, amount, direction, and price threshold
-   - System validates user balance and allowances
-   - Order creation event is emitted
+1. **Initial Order Creation**:
+   - First stop order is created during reactive contract deployment
+   - Order includes token pair, client address, direction, and price threshold
+   - System validates order parameters and emits creation event
 
-2. **Dynamic Event Monitoring**:
-   - RSC contract detects new stop order events
-   - Dynamically subscribes to relevant Uniswap V2 pair events
-   - Only monitors pairs with active orders for gas efficiency
-   - Manages multiple orders with proper state tracking
+2. **Additional Order Management**:
+   - Contract deployer can create additional stop orders for any pair
+   - Each order is tracked independently with unique order IDs
+   - System supports multiple orders per pair and across different pairs
 
-3. **Automated Price Monitoring**:
-   - RSC monitors Sync events from Uniswap V2 pairs
+3. **Dynamic Event Monitoring**:
+   - RSC contract automatically subscribes to relevant Uniswap V2 pair events
+   - Monitors Sync events from all pairs with active orders
+   - Optimized subscription management - only monitors pairs with active orders
+
+4. **Automated Price Monitoring**:
+   - RSC processes Sync events from Uniswap V2 pairs in real-time
    - Calculates current price ratios using reserve data
-   - Compares against user-defined thresholds
-   - Implements cooldown periods to prevent spam
+   - Compares against user-defined thresholds for each active order
 
-4. **Smart Order Execution**:
-   - When price conditions are met, RSC triggers callback
-   - Callback contract validates conditions and executes swap
-   - Includes retry logic for failed transactions
-   - Handles edge cases like insufficient balance/allowance
+5. **Smart Order Execution**:
+   - When price conditions are met, RSC triggers callback to Sepolia
+   - Callback contract validates conditions and executes swap via Uniswap router
+   - Automatic cleanup of executed orders and subscription management
 
-5. **Comprehensive Order Management**:
-   - Users can pause, resume, or cancel orders
-   - System tracks order status and execution history
-   - Automatic cleanup when orders complete or fail
+6. **Comprehensive Order Lifecycle**:
+   - Orders can be cancelled by the contract deployer
+   - System tracks order status (Active, Executed, Cancelled, Failed)
    - Dynamic unsubscription when no orders remain for a pair
 
 ## Contract Architecture
 
 The system consists of two main contracts:
 
-### 1. StopOrderCallback (Sepolia Chain)
-- **Order Management**: Create, cancel, pause, resume stop orders
-- **Execution Logic**: Handles actual token swaps through Uniswap router
-- **State Tracking**: Maintains order status and execution history
-- **Safety Features**: Balance/allowance checks, retry logic, error handling
-- **Event Emission**: Emits events for RSC to monitor
+### 1. UniswapDemoStopOrderCallback (Sepolia Chain)
+- **Order Execution**: Handles actual token swaps through Uniswap router
+- **Validation Logic**: Checks price thresholds, balance, and allowances
+- **Event Emission**: Emits `Stop` events for RSC to track execution status
+- **Safety Features**: Comprehensive validation and error handling
 
-### 2. StopOrderReactive (Reactive Network)
-- **Event Monitoring**: Listens for stop order lifecycle events
-- **Dynamic Subscriptions**: Only subscribes to pairs with active orders
+### 2. UniswapDemoStopOrderReactive (Reactive Network)
+- **Multi-Order Management**: Tracks multiple orders with unique IDs
+- **Dynamic Subscriptions**: Subscribes to pairs with active orders only
 - **Price Monitoring**: Processes Uniswap Sync events for price changes
-- **Trigger Logic**: Determines when to execute orders based on thresholds
-- **State Management**: Tracks multiple orders with proper status handling
+- **Access Control**: Only deployer can create and cancel orders
+- **Event Handling**: Processes both Sync and Stop events
 
 ## Key Features
 
-### Advanced Order Management
-- **Multiple Order Support**: Handle unlimited orders per user
-- **Directional Trading**: Support both token0→token1 and token1→token0 swaps
-- **Flexible Thresholds**: Custom price coefficients and thresholds
-- **Order Lifecycle**: Complete pause/resume/cancel functionality
+### Advanced Multi-Order Management
+- **Single Contract Deployment**: Handle unlimited orders from one RSC deployment
+- **Cross-Pair Support**: Create orders for any Uniswap V2 pair
+- **Independent Execution**: Each order executes independently based on its threshold
+- **Order Lifecycle Tracking**: Complete status management (Active/Executed/Cancelled/Failed)
 
 ### Robust Execution Engine
-- **Retry Logic**: Failed orders retry up to 3 times with cooldown
-- **Gas Optimization**: Cooldown periods prevent excessive gas usage
+- **Automatic Execution**: Orders execute when price thresholds are met
 - **Balance Protection**: Real-time balance and allowance verification
-- **Slippage Handling**: Accepts any amount out (configurable in production)
+- **Slippage Handling**: Configurable slippage protection
+- **Gas Optimization**: Efficient event processing and subscription management
 
 ### Dynamic Resource Management
 - **Smart Subscriptions**: Only monitor pairs with active orders
-- **Automatic Cleanup**: Unsubscribe when no orders remain
+- **Automatic Cleanup**: Unsubscribe when no orders remain for a pair
 - **Memory Efficiency**: Optimized data structures for gas efficiency
-- **Event Filtering**: Process only relevant events
+- **Event Filtering**: Process only relevant Sync and Stop events
 
-### Safety & Security
-- **Access Control**: Order owners can only manage their orders
+### Access Control & Security
+- **Deployer-Only Management**: Only contract deployer can create/cancel orders
 - **Input Validation**: Comprehensive validation of all parameters
-- **Error Recovery**: Graceful handling of failed transactions
+- **Safe Token Handling**: Proper allowance and balance checks
 - **Reentrancy Protection**: Safe state management patterns
 
 ## Environment Setup
@@ -93,19 +92,23 @@ foundryup
 Set up the required environment variables:
 
 ```bash
-# Private key (NEVER share or commit this)
-export PRIVATE_KEY=your_private_key
+# Private keys (NEVER share or commit these)
+export SEPOLIA_PRIVATE_KEY=your_sepolia_private_key
+export REACTIVE_PRIVATE_KEY=your_reactive_private_key
 
 # Network RPC URLs
-export SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
-export REACTIVE_RPC_URL=https://lasna-rpc.rnk.dev/
+export SEPOLIA_RPC=https://ethereum-sepolia-rpc.publicnode.com
+export REACTIVE_RPC=https://lasna-rpc.rnk.dev/
 
 # Contract addresses
+export UNISWAP_V2_FACTORY=0x7E0987E5b3a30e3f2828572Bb659A548460a3003
 export UNISWAP_V2_ROUTER=0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008
-export REACTIVE_CALLBACK_PROXY=0xc9f36411C9897e7F959D99ffca2a0Ba7ee0D7bDA
+export SEPOLIA_CALLBACK_PROXY_ADDR=0xc9f36411C9897e7F959D99ffca2a0Ba7ee0D7bDA
+export SYSTEM_CONTRACT_ADDR=reactive_system_contract_address
 
-# Deployer wallet address
-export CLIENT_WALLET=0x941b727Ad8ACF020558Ce58CD7Cb65b48B958DB1
+# Wallet addresses
+export USER_WALLET=$(cast wallet address --private-key $SEPOLIA_PRIVATE_KEY)
+export USER_WALLET_REACTIVE=$(cast wallet address --private-key $REACTIVE_PRIVATE_KEY)
 ```
 
 ### Project Setup
@@ -126,345 +129,336 @@ forge remappings > remappings.txt
 
 ## Deployment Process
 
-### Step 1: Deploy the Stop Order Callback Contract (Sepolia)
+### Step 1: Deploy Test Tokens (Optional)
 
-#### Option A: Using Foundry Script (Recommended)
-```bash
-# Deploy using the deployment script
-forge script script/Deploy.s.sol --rpc-url $SEPOLIA_RPC_URL --broadcast
-
-# Save the deployed callback address from output
-export CALLBACK_ADDRESS=0x9148309eFB90b8803187413DFEE904327DFD8835  # Replace with deployed address
-```
-
-#### Option B: Manual Deployment
-```bash
-forge create --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  src/StopOrderCallback.sol:StopOrderCallback --via-ir --broadcast --value 0.01ether \
-  --constructor-args $REACTIVE_CALLBACK_PROXY $UNISWAP_V2_ROUTER \
-  
-
-# Save the deployed callback address
-export CALLBACK_ADDRESS=0x...  # Replace with deployed address
-```
-
-### Step 3: Deploy the RSC Contract (Reactive Network)
-
-Deploy the RSC contract that will monitor events and trigger executions:
+Create test tokens for development and testing:
 
 ```bash
-forge create --legacy --rpc-url $REACTIVE_RPC_URL --private-key $PRIVATE_KEY \
-  src/StopOrderReactive.sol:StopOrderReactive --value 0.01ether --broadcast \
-  --constructor-args $CALLBACK_ADDRESS \
-  
+# Deploy test tokens
+forge create --broadcast --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  src/UniswapDemoToken.sol:UniswapDemoToken \
+  --constructor-args "Test Token A" "TKA"
+
+export TOKEN_A=0x...  # Save deployed address
+
+forge create --broadcast --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  src/UniswapDemoToken.sol:UniswapDemoToken \
+  --constructor-args "Test Token B" "TKB"
+
+export TOKEN_B=0x...  # Save deployed address
 ```
 
-Save the deployed RSC address:
+### Step 2: Create Uniswap Pair
+
 ```bash
-export RSC_ADDRESS=0x...  # Replace with deployed address
+# Create trading pair
+cast send $UNISWAP_V2_FACTORY 'createPair(address,address)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  $TOKEN_A $TOKEN_B
+
+# Get pair address
+PAIR_RAW=$(cast call $UNISWAP_V2_FACTORY 'getPair(address,address)' \
+  --rpc-url $SEPOLIA_RPC $TOKEN_A $TOKEN_B)
+export PAIR_ADDRESS=$(cast --to-checksum-address ${PAIR_RAW:26})
+
+echo "Pair Address: $PAIR_ADDRESS"
 ```
 
-### Step 4: Verify Deployment
-
-Check that both contracts are deployed correctly:
+### Step 3: Add Initial Liquidity
 
 ```bash
-# Check callback contract
-cast call $CALLBACK_ADDRESS "router()(address)" --rpc-url $SEPOLIA_RPC_URL
+# Approve tokens for router
+cast send $TOKEN_A 'approve(address,uint256)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  $UNISWAP_V2_ROUTER 50000000000000000000
 
-# Check RSC contract
-cast call $RSC_ADDRESS "react()" --rpc-url $REACTIVE_RPC_URL
+cast send $TOKEN_B 'approve(address,uint256)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  $UNISWAP_V2_ROUTER 50000000000000000000
+
+# Add liquidity (1:1 ratio)
+cast send $UNISWAP_V2_ROUTER \
+  'addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  $TOKEN_A $TOKEN_B 20000000000000000000 20000000000000000000 0 0 $USER_WALLET 2707391655
 ```
+
+### Step 4: Deploy Callback Contract (Sepolia)
+
+```bash
+# Deploy callback contract
+forge create --broadcast --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  --via-ir src/UniswapDemoStopOrderCallback.sol:UniswapDemoStopOrderCallback \
+  --value 0.01ether \
+  --constructor-args $SEPOLIA_CALLBACK_PROXY_ADDR $UNISWAP_V2_ROUTER
+
+export CALLBACK_ADDR=0x...  # Save deployed address
+```
+
+### Step 5: Deploy Reactive Contract with Initial Order
+
+```bash
+# Deploy reactive contract with first stop order
+# Parameters: pair, callback, client, token0, coefficient, threshold
+forge create --broadcast --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY \
+  --via-ir src/UniswapDemoStopOrderReactive.sol:UniswapDemoStopOrderReactive \
+  --value 1ether \
+  --constructor-args $PAIR_ADDRESS $CALLBACK_ADDR $USER_WALLET_REACTIVE true 1000000000000000000 950000000000000000
+
+export REACTIVE_ADDR=0x...  # Save deployed address
+```
+
+The constructor parameters explained:
+- `pair`: The Uniswap V2 pair address
+- `callback`: The callback contract address on Sepolia  
+- `client`: The address that will own the order (holds tokens)
+- `token0`: `true` to sell token0, `false` to sell token1
+- `coefficient`: Price calculation coefficient (e.g., 1000000000000000000 = 1e18)
+- `threshold`: Price threshold that triggers the order (e.g., 950000000000000000 = 0.95 = 95%)
 
 ## Using the Stop Order System
 
-### Step 1: Prepare Test Tokens (If Needed)
-
-#### Option A: Using Deployment Script (Recommended)
-```bash
-# Deploy test tokens using script
-forge script script/Deploy.s.sol:DeployScript --sig "deployTestTokens()" \
-  --rpc-url $SEPOLIA_RPC_URL --broadcast
-
-# Save the token addresses from output
-export TOKEN1=0x...  # Replace with deployed address
-export TOKEN2=0x...  # Replace with deployed address
-```
-
-#### Option B: Manual Token Deployment
-```bash
-# Deploy test token 1
-forge create --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  test/TestToken.sol:TestToken --broadcast \
-  --constructor-args "Test Token 1" "TK1" 18 1000000000000000000000
-
-export TOKEN1=0x...  # Replace with deployed address
-
-# Deploy test token 2
-forge create --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  test/TestToken.sol:TestToken --broadcast \
-  --constructor-args "Test Token 2" "TK2" 18 1000000000000000000000
-
-export TOKEN2=0x...  # Replace with deployed address
-```
-
-#### Option C: Use Existing Tokens
-```bash
-# Use existing test tokens (example addresses)
-export TOKEN1=0xAEa693033F63A3403Ce3D0ea3C7D01E88AFF63c0
-export TOKEN2=0x291eC3425647af3b022d46df4Fa81b45e0b47f46
-```
-
-### Step 2: Create or Use Existing Uniswap Pair
-
-Find or create a Uniswap V2 pair for your tokens:
-
-```bash
-# Example pair addresses (replace with actual pairs)
-export PAIR_ADDRESS=0x58078D5eC354d39a54BFDf32ac3eaF001ebBcA07
-```
-
-To create a new pair:
-```bash
-# Create pair using Uniswap V2 Factory
-cast send 0x7E0987E5b3a30e3f2828572Bb659A548460a3003 \
-  'createPair(address,address)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $TOKEN1 $TOKEN2
-
-# Add liquidity to the pair
-cast send $TOKEN1 'transfer(address,uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $PAIR_ADDRESS 10000000000000000000
-
-cast send $TOKEN2 'transfer(address,uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $PAIR_ADDRESS 10000000000000000000
-
-cast send $PAIR_ADDRESS 'mint(address)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $CLIENT_WALLET
-```
-
-### Step 3: Approve Token Spending
+### Step 1: Approve Token Spending
 
 Approve the callback contract to spend your tokens:
 
 ```bash
-# Approve token spending (example: 100 tokens)
-cast send $TOKEN1 'approve(address,uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $CALLBACK_ADDRESS 100000000000000000000
+# Approve token spending for initial order
+cast send $TOKEN_A 'approve(address,uint256)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  $CALLBACK_ADDR 10000000000000000000  # 10 tokens
 ```
 
-### Step 4: Create a Stop Order
+### Step 2: Create Additional Stop Orders
 
-Create your first stop order:
+Only the contract deployer can create additional orders:
 
 ```bash
-# Example: Sell 10 TOKEN1 for TOKEN2 if price drops 10%
-# Parameters: pair, sellToken0, amount, coefficient, threshold
-cast send $CALLBACK_ADDRESS \
-  'createStopOrder(address,bool,uint256,uint256,uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $PAIR_ADDRESS true 10000000000000000000 1000 900
+# Create second order for same pair with different threshold
+cast send $REACTIVE_ADDR 'createStopOrder(address,address,bool,uint256,uint256)' \
+  --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY \
+  $PAIR_ADDRESS $USER_WALLET_REACTIVE true 1000000000000000000 900000000000000000
+
+# Create order for different pair
+cast send $REACTIVE_ADDR 'createStopOrder(address,address,bool,uint256,uint256)' \
+  --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY \
+  $OTHER_PAIR_ADDRESS $USER_WALLET_REACTIVE false 1000000000000000000 950000000000000000
 ```
 
-The parameters explained:
-- `pair`: The Uniswap V2 pair address
-- `sellToken0`: `true` to sell token0, `false` to sell token1
-- `amount`: Amount of tokens to sell (in wei)
-- `coefficient`: Price calculation coefficient (e.g., 1000)
-- `threshold`: Price threshold that triggers the order (e.g., 900 = 90% of original)
+### Step 3: Monitor Your Orders
 
-### Step 5: Monitor Your Orders
-
-Check your orders:
+Check order status:
 
 ```bash
-# Get user orders
-cast call $CALLBACK_ADDRESS 'getUserOrders(address)(uint256[])' \
-  --rpc-url $SEPOLIA_RPC_URL $CLIENT_WALLET
+# Get all active orders for user
+cast call $REACTIVE_ADDR 'getUserActiveOrders(address)' \
+  --rpc-url $REACTIVE_RPC $USER_WALLET_REACTIVE
 
-# Get specific order details (replace 0 with your order ID)
-cast call $CALLBACK_ADDRESS 'getOrder(uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL 0
+# Get specific order details
+cast call $REACTIVE_ADDR 'getStopOrder(uint256)' \
+  --rpc-url $REACTIVE_RPC 1
+
+# Get all order categories for user
+cast call $REACTIVE_ADDR 'getAllUserOrders(address)' \
+  --rpc-url $REACTIVE_RPC $USER_WALLET_REACTIVE
+
+# Check next order ID
+cast call $REACTIVE_ADDR 'nextOrderId()' \
+  --rpc-url $REACTIVE_RPC
 ```
 
-### Step 6: Test Order Execution
+### Step 4: Test Order Execution
 
-Trigger the order by manipulating the pair price:
+Trigger orders by changing pair prices:
 
 ```bash
-# Transfer tokens to pair to change the ratio
-cast send $TOKEN2 'transfer(address,uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $PAIR_ADDRESS 20000000000000000000
+# Make a large swap to change the price ratio
+cast send $TOKEN_A 'approve(address,uint256)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  $UNISWAP_V2_ROUTER 5000000000000000000
 
-# Execute swap to change the exchange rate
-cast send $PAIR_ADDRESS 'swap(uint,uint,address,bytes)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  5000000000000000000 0 $CLIENT_WALLET "0x"
+cast send $UNISWAP_V2_ROUTER \
+  'swapExactTokensForTokens(uint256,uint256,address[],address,uint256)' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY \
+  5000000000000000000 0 [$TOKEN_A,$TOKEN_B] $USER_WALLET 2707391655
 ```
 
-The RSC will detect the price change and automatically execute your stop order if the threshold is met.
+The RSC will automatically detect the price change and execute any orders whose thresholds are met.
 
 ## Order Management Commands
 
-### Pause an Order
-```bash
-cast send $CALLBACK_ADDRESS 'pauseStopOrder(uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY 0
-```
-
-### Resume an Order
-```bash
-cast send $CALLBACK_ADDRESS 'resumeStopOrder(uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY 0
-```
-
 ### Cancel an Order
+Only the contract deployer can cancel orders:
+
 ```bash
-cast send $CALLBACK_ADDRESS 'cancelStopOrder(uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY 0
+cast send $REACTIVE_ADDR 'cancelStopOrder(uint256)' \
+  --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY 1
 ```
 
-### Force Execute an Order (Manual Override)
+### Check Order Categories
+
 ```bash
-cast send $CALLBACK_ADDRESS 'executeStopOrder(address,uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
-  $CLIENT_WALLET 0
+# Active orders
+cast call $REACTIVE_ADDR 'getUserActiveOrders(address)' \
+  --rpc-url $REACTIVE_RPC $USER_WALLET_REACTIVE
+
+# Executed orders  
+cast call $REACTIVE_ADDR 'getUserExecutedOrders(address)' \
+  --rpc-url $REACTIVE_RPC $USER_WALLET_REACTIVE
+
+# Cancelled orders
+cast call $REACTIVE_ADDR 'getUserCancelledOrders(address)' \
+  --rpc-url $REACTIVE_RPC $USER_WALLET_REACTIVE
+
+# Failed orders
+cast call $REACTIVE_ADDR 'getUserFailedOrders(address)' \
+  --rpc-url $REACTIVE_RPC $USER_WALLET_REACTIVE
 ```
 
 ## Monitoring and Debugging
 
 ### Monitor Events
 
-Track order creation events:
+Track order creation:
 ```bash
-cast logs $CALLBACK_ADDRESS \
-  --rpc-url $SEPOLIA_RPC_URL \
+cast logs $REACTIVE_ADDR \
+  --rpc-url $REACTIVE_RPC \
   --from-block 0 \
   --to-block latest \
-  "StopOrderCreated(address,uint256,address,bool,address,address,uint256,uint256,uint256)"
+  "StopOrderCreated(uint256,address,address,bool,uint256,uint256)"
 ```
 
 Monitor order executions:
 ```bash
-cast logs $CALLBACK_ADDRESS \
-  --rpc-url $SEPOLIA_RPC_URL \
+cast logs $CALLBACK_ADDR \
+  --rpc-url $SEPOLIA_RPC \
   --from-block 0 \
   --to-block latest \
-  "StopOrderExecuted(address,uint256,address,address,address,uint256,uint256)"
+  "Stop(address,address,address,uint256,uint256[])"
 ```
 
-Check for execution failures:
+Monitor order completions:
 ```bash
-cast logs $CALLBACK_ADDRESS \
-  --rpc-url $SEPOLIA_RPC_URL \
+cast logs $REACTIVE_ADDR \
+  --rpc-url $REACTIVE_RPC \
   --from-block 0 \
   --to-block latest \
-  "ExecutionFailed(uint256,string)"
+  "OrderCompleted(uint256)"
 ```
 
-### Monitor RSC Activity
+### Monitor Pair Reserves
 
-Track RSC order tracking:
+Check current pair state:
 ```bash
-cast logs $RSC_ADDRESS \
-  --rpc-url $REACTIVE_RPC_URL \
-  --from-block 0 \
-  --to-block latest \
-  "OrderTracked(address,uint256,address)"
+cast call $PAIR_ADDRESS 'getReserves()' \
+  --rpc-url $SEPOLIA_RPC
 ```
 
-Monitor pair subscriptions:
-```bash
-cast logs $RSC_ADDRESS \
-  --rpc-url $REACTIVE_RPC_URL \
-  --from-block 0 \
-  --to-block latest \
-  "PairSubscribed(address)"
-```
+### Check Deployer Access
 
-### Check Current Status
-
-Get current price for a pair:
+Verify deployer permissions:
 ```bash
-cast call $CALLBACK_ADDRESS 'getCurrentPrice(address,bool)(uint256)' \
-  --rpc-url $SEPOLIA_RPC_URL $PAIR_ADDRESS true
-```
+cast call $REACTIVE_ADDR 'getDeployer()' \
+  --rpc-url $REACTIVE_RPC
 
-Check if pair is being monitored:
-```bash
-cast call $RSC_ADDRESS 'isPairSubscribed(address)(bool)' \
-  --rpc-url $REACTIVE_RPC_URL $PAIR_ADDRESS
-```
-
-Get tracked order details:
-```bash
-cast call $RSC_ADDRESS 'getTrackedOrder(uint256)' \
-  --rpc-url $REACTIVE_RPC_URL 0
+# Compare with your wallet
+echo "Your wallet: $(cast wallet address --private-key $REACTIVE_PRIVATE_KEY)"
 ```
 
 ## Advanced Configuration
 
-### Adjusting Price Calculation
+### Price Calculation
 
-The price calculation uses the formula:
+The system uses this formula to determine when orders trigger:
 ```
 For selling token0: (reserve1 * coefficient) / reserve0 <= threshold
 For selling token1: (reserve0 * coefficient) / reserve1 <= threshold
 ```
 
-Example configurations:
-- **10% drop**: coefficient=1000, threshold=900
-- **20% drop**: coefficient=100, threshold=80
-- **5% drop**: coefficient=10000, threshold=9500
+Example threshold configurations:
+- **5% drop**: coefficient=1000000000000000000 (1e18), threshold=950000000000000000 (0.95e18)
+- **10% drop**: coefficient=1000000000000000000 (1e18), threshold=900000000000000000 (0.90e18)
+- **20% drop**: coefficient=1000000000000000000 (1e18), threshold=800000000000000000 (0.80e18)
 
-### Gas Optimization Tips
+### Multi-Order Strategy Examples
 
-1. **Batch Operations**: Create multiple orders in a single transaction if possible
-2. **Optimal Amounts**: Use significant amounts to justify gas costs
-3. **Pair Selection**: Choose liquid pairs to ensure execution success
-4. **Cooldown Periods**: Default 5-minute cooldown prevents excessive gas usage
+```bash
+# Laddered sells: Multiple orders at different thresholds
+# Order 1: Sell 25% at 5% drop
+cast send $REACTIVE_ADDR 'createStopOrder(address,address,bool,uint256,uint256)' \
+  --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY \
+  $PAIR_ADDRESS $USER_WALLET_REACTIVE true 1000000000000000000 950000000000000000
 
-### Production Considerations
+# Order 2: Sell 25% at 10% drop  
+cast send $REACTIVE_ADDR 'createStopOrder(address,address,bool,uint256,uint256)' \
+  --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY \
+  $PAIR_ADDRESS $USER_WALLET_REACTIVE true 1000000000000000000 900000000000000000
+
+# Order 3: Sell remaining 50% at 20% drop
+cast send $REACTIVE_ADDR 'createStopOrder(address,address,bool,uint256,uint256)' \
+  --rpc-url $REACTIVE_RPC --private-key $REACTIVE_PRIVATE_KEY \
+  $PAIR_ADDRESS $USER_WALLET_REACTIVE true 1000000000000000000 800000000000000000
+```
+
+## Comprehensive Testing
+
+### Test Multiple Pairs and Orders
+
+For comprehensive testing, follow the multi-position testing guide that demonstrates:
+
+1. **3 Trading Pairs**: TOKEN_A/TOKEN_B, TOKEN_C/TOKEN_B, TOKEN_D/TOKEN_B
+2. **4 Stop Orders**: 2 orders on Pair 1, 1 order each on Pairs 2 and 3
+3. **All Operations**: Create, execute, and cancel orders
+4. **Subscription Management**: Verify proper cleanup when orders complete
+
+### Validation Checks
+
+```bash
+# Verify all orders execute correctly
+# Verify subscription cleanup
+# Verify access control works
+# Verify token balances change appropriately
+# Verify pair reserves reflect executed swaps
+```
+
+## Production Considerations
 
 For production deployment, consider:
 
-1. **Access Control**: Implement proper admin controls
-2. **Fee Structure**: Add protocol fees for sustainability
-3. **Slippage Protection**: Implement maximum slippage settings
+1. **Access Control**: Implement proper governance or multisig controls
+2. **Fee Structure**: Add protocol fees for sustainability  
+3. **Slippage Protection**: Implement minimum output amount requirements
 4. **Oracle Integration**: Use price oracles for additional validation
 5. **MEV Protection**: Consider MEV-resistant execution strategies
+6. **Gas Optimization**: Optimize for lower gas costs on both chains
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Order Not Executing**:
-   - Check if threshold is set correctly
-   - Verify sufficient balance and allowances
-   - Ensure pair has sufficient liquidity
+   - Check if threshold is set correctly relative to coefficient
+   - Verify sufficient token balance and allowances
+   - Ensure pair has adequate liquidity
 
-2. **RSC Not Responding**:
-   - Verify RSC has sufficient funding
-   - Check event topics match contract events
-   - Ensure proper network configuration
+2. **Access Control Errors**:
+   - Verify you're using the correct deployer private key
+   - Check that `getDeployer()` matches your wallet address
 
 3. **Transaction Failures**:
    - Check gas limits are sufficient
-   - Verify router approvals
-   - Ensure tokens are tradeable
+   - Verify router approvals are in place
+   - Ensure tokens are tradeable and not paused
 
 ### Recovery Commands
 
-Emergency ETH withdrawal from contracts:
 ```bash
-# Withdraw from callback contract
-cast send $CALLBACK_ADDRESS 'withdrawETH()' \
-  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
+# Check deployer status
+cast call $REACTIVE_ADDR 'getDeployer()' --rpc-url $REACTIVE_RPC
+
+# Emergency withdrawal (if implemented)
+cast send $CALLBACK_ADDR 'withdrawETH()' \
+  --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PRIVATE_KEY
 ```
 
 ## Support and Development
@@ -473,21 +467,21 @@ cast send $CALLBACK_ADDRESS 'withdrawETH()' \
 
 The system includes comprehensive tests:
 ```bash
-# Run unit tests
+# Run all tests
 forge test
 
-# Run integration tests
-forge test --fork-url $SEPOLIA_RPC_URL
+# Run with forking
+forge test --fork-url $SEPOLIA_RPC
 
 # Run specific test
-forge test --match-test testCreateStopOrder
+forge test --match-test testMultipleOrders
 ```
 
 ### Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
+2. Create a feature branch  
+3. Add comprehensive tests
 4. Ensure all tests pass
 5. Submit a pull request
 
@@ -498,4 +492,4 @@ For support and questions:
 - Join our Discord community
 - Check the documentation wiki
 
-This stop order system represents a significant advancement in DeFi automation, providing users with sophisticated trading tools while maintaining security and decentralization.
+This multi-order stop order system enables sophisticated automated trading strategies while maintaining security, decentralization, and efficient resource usage. The single deployment approach with multi-order support makes it cost-effective for users who want to implement complex trading strategies across multiple pairs and thresholds.

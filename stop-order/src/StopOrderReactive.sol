@@ -1,445 +1,347 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+
 pragma solidity >=0.8.0;
 
-import "../lib/reactive-lib/src/interfaces/IReactive.sol";
-import "../lib/reactive-lib/src/abstract-base/AbstractReactive.sol";
+import '../lib/reactive-lib/src/interfaces/IReactive.sol';
+import '../lib/reactive-lib/src/abstract-base/AbstractReactive.sol';
 
-contract StopOrderReactive is IReactive, AbstractReactive {
-    // Events
-    event OrderTracked(
+struct Reserves {
+    uint112 reserve0;
+    uint112 reserve1;
+}
+
+enum OrderStatus {
+    Active,
+    Cancelled,
+    Executed,
+    Failed
+}
+
+struct StopOrder {
+    address pair;
+    address client;
+    bool token0;
+    uint256 coefficient;
+    uint256 threshold;
+    OrderStatus status;
+    bool triggered;
+    uint256 createdAt;
+    uint256 updatedAt;
+}
+
+contract UniswapDemoStopOrderReactive is IReactive, AbstractReactive {
+    event StopOrderCreated(
+        uint256 indexed orderId,
         address indexed pair,
+        address indexed client,
+        bool token0,
+        uint256 coefficient,
+        uint256 threshold
+    );
+
+    event StopOrderCancelled(
         uint256 indexed orderId,
         address indexed client
     );
-    
-    event OrderUntracked(
-        address indexed pair,
-        uint256 indexed orderId
-    );
-    
-    event PairSubscribed(
-        address indexed pair
-    );
-    
-    event PairUnsubscribed(
-        address indexed pair
-    );
-    
-    event ExecutionTriggered(
-        uint256 indexed orderId,
-        address indexed pair,
-        bool priceConditionMet
-    );
-    
-    event ProcessingError(
-        string reason,
-        uint256 orderId
-    );
-    
-    // Added debug event to see exact threshold calculations
-    event ThresholdCheck(
-        uint256 indexed orderId,
-        uint256 calculated,
-        uint256 threshold,
-        bool conditionMet,
-        bool sellToken0
-    );
-    
-    // Constants
+
+    event CallbackSent(uint256 indexed orderId);
+    event OrderCompleted(uint256 indexed orderId);
+    event OrderFailed(uint256 indexed orderId, string reason);
+
     uint256 private constant SEPOLIA_CHAIN_ID = 11155111;
-    uint256 private constant REACTIVE_CHAIN_ID = 5318007; // Lasna network chain ID
     uint256 private constant UNISWAP_V2_SYNC_TOPIC_0 = 0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1;
-    uint256 private constant STOP_ORDER_CREATED_TOPIC_0 = 0x9b04d9cf86fd3b602bd071c32af665e7d3937a1e5b1b9cf1dd38a8343b595b2a; // keccak256("StopOrderCreated(address,uint256,address,bool,address,address,uint256,uint256,uint256)")
-    uint256 private constant STOP_ORDER_CANCELLED_TOPIC_0 = 0xfe37e6bb58b8cd2f910ea053f64bb539b39cc1c88a576a320b59bcbf4f339dfc; // keccak256("StopOrderCancelled(uint256,address)")
-    uint256 private constant STOP_ORDER_EXECUTED_TOPIC_0 = 0x2a5962540e657deb5eb7f9238cc31815325d1e74cf8e6415ea3d7a5b9886997d; // keccak256("StopOrderExecuted(address,uint256,address,address,address,uint256,uint256)")
-    uint256 private constant STOP_ORDER_PAUSED_TOPIC_0 = 0x552b2dd798eedf0c450199b5a7c35ff9f2955c113876b1afbe87060335b31653; // keccak256("StopOrderPaused(uint256,address)")
-    uint256 private constant STOP_ORDER_RESUMED_TOPIC_0 = 0x9bffe4738606691ddfa5e5d28208b6ef74537676b39ddb9854b7854a62df0692; // keccak256("StopOrderResumed(uint256,address)")
+    uint256 private constant STOP_ORDER_STOP_TOPIC_0 = 0x9996f0dd09556ca972123b22cf9f75c3765bc699a1336a85286c7cb8b9889c6b;
     uint64 private constant CALLBACK_GAS_LIMIT = 1000000;
+
+    // Access control
+    address private deployer;
+
+    // State specific to ReactVM instance of the contract.
+    mapping(uint256 => StopOrder) public stopOrders;
+    mapping(address => uint256[]) public userActiveOrders;
+    mapping(address => uint256[]) public userExecutedOrders;
+    mapping(address => uint256[]) public userCancelledOrders;
+    mapping(address => uint256[]) public userFailedOrders;
     
-    // Order status enum (mirrors the callback contract)
-    enum OrderStatus { Active, Paused, Cancelled, Executed, Failed }
-    
-    // Reserves struct for Uniswap sync events
-    struct Reserves {
-        uint112 reserve0;
-        uint112 reserve1;
+    uint256 public nextOrderId;
+    address private stop_order_callback;
+
+    modifier onlyDeployer() {
+        require(msg.sender == deployer, "Only deployer can call this function");
+        _;
     }
-    
-    // Order tracking struct
-    struct TrackedOrder {
-        uint256 id;
-        address pair;
-        address client;
-        bool sellToken0;
-        uint256 coefficient;
-        uint256 threshold;
-        OrderStatus status;
-        uint256 lastTriggeredAt;
-        uint8 triggerCount;
+
+    constructor(
+        address _pair,
+        address _stop_order_callback,
+        address _client,
+        bool _token0,
+        uint256 _coefficient,
+        uint256 _threshold
+    ) payable {
+        deployer = msg.sender;
+        stop_order_callback = _stop_order_callback;
+        nextOrderId = 1; // Start from 1, not 0
+        _createStopOrder(_pair, _client, _token0, _coefficient, _threshold);
     }
-    
-    // State variables
-    address private stopOrderCallback;
-    
-    // Order tracking
-    mapping(uint256 => TrackedOrder) private trackedOrders;
-    mapping(address => uint256[]) private pairOrders; // pair -> orderIds
-    mapping(address => uint256) private pairOrderCount;
-    mapping(address => bool) private subscribedPairs;
-    
-    // Constants for retry logic
-    uint256 private constant TRIGGER_COOLDOWN = 300; // 5 minutes between triggers
-    uint8 private constant MAX_TRIGGER_ATTEMPTS = 5;
-    
-    constructor(address _stopOrderCallback) payable {
-        stopOrderCallback = _stopOrderCallback;
+
+    function createStopOrder(
+        address _pair,
+        address _client,
+        bool _token0,
+        uint256 _coefficient,
+        uint256 _threshold
+    ) external onlyDeployer returns (uint256 orderId) {
+        require(_client != address(0), "Invalid client address");
+        require(_pair != address(0), "Invalid pair address");
+        require(_coefficient > 0, "Coefficient must be greater than 0");
+        require(_threshold > 0, "Threshold must be greater than 0");
         
-        if (!vm) {
-            // Subscribe to stop order lifecycle events
-            service.subscribe(
-                SEPOLIA_CHAIN_ID,
-                stopOrderCallback,
-                STOP_ORDER_CREATED_TOPIC_0,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE
-            );
-            
-            service.subscribe(
-                SEPOLIA_CHAIN_ID,
-                stopOrderCallback,
-                STOP_ORDER_CANCELLED_TOPIC_0,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE
-            );
-            
-            service.subscribe(
-                SEPOLIA_CHAIN_ID,
-                stopOrderCallback,
-                STOP_ORDER_EXECUTED_TOPIC_0,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE
-            );
-            
-            service.subscribe(
-                SEPOLIA_CHAIN_ID,
-                stopOrderCallback,
-                STOP_ORDER_PAUSED_TOPIC_0,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE
-            );
-            
-            service.subscribe(
-                SEPOLIA_CHAIN_ID,
-                stopOrderCallback,
-                STOP_ORDER_RESUMED_TOPIC_0,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE
-            );
-        }
+        return _createStopOrder(_pair, _client, _token0, _coefficient, _threshold);
     }
-    
-    // Main reaction function
-    function react(LogRecord calldata log) external vmOnly {
-        if (log._contract == stopOrderCallback) {
-            _processStopOrderEvent(log);
-        } else if (log.topic_0 == UNISWAP_V2_SYNC_TOPIC_0 && subscribedPairs[log._contract]) {
-            _processSyncEvent(log);
-        }
-    }
-    
-    // Process stop order lifecycle events
-    function _processStopOrderEvent(LogRecord calldata log) internal {
-        if (log.topic_0 == STOP_ORDER_CREATED_TOPIC_0) {
-            _processOrderCreated(log);
-        } else if (log.topic_0 == STOP_ORDER_CANCELLED_TOPIC_0) {
-            _processOrderCancelled(log);
-        } else if (log.topic_0 == STOP_ORDER_EXECUTED_TOPIC_0) {
-            _processOrderExecuted(log);
-        } else if (log.topic_0 == STOP_ORDER_PAUSED_TOPIC_0) {
-            _processOrderPaused(log);
-        } else if (log.topic_0 == STOP_ORDER_RESUMED_TOPIC_0) {
-            _processOrderResumed(log);
-        }
-    }
-    
-    // Process order creation
-    function _processOrderCreated(LogRecord calldata log) internal {
-        // Extract data from event topics
-        address pair = address(uint160(log.topic_1));
-        uint256 orderId = uint256(log.topic_2);
-        address client = address(uint160(log.topic_3));
-        
-        // Decode additional data from log.data
-        (
-            bool sellToken0,
-            address tokenSell,
-            address tokenBuy,
-            uint256 amount,
-            uint256 coefficient,
-            uint256 threshold
-        ) = abi.decode(log.data, (bool, address, address, uint256, uint256, uint256));
-        
-        // Track the order
-        trackedOrders[orderId] = TrackedOrder({
-            id: orderId,
-            pair: pair,
-            client: client,
-            sellToken0: sellToken0,
-            coefficient: coefficient,
-            threshold: threshold,
+
+    function _createStopOrder(
+        address _pair,
+        address _client,
+        bool _token0,
+        uint256 _coefficient,
+        uint256 _threshold
+    ) internal returns (uint256 orderId) {
+        orderId = nextOrderId;
+        nextOrderId++;
+
+        stopOrders[orderId] = StopOrder({
+            pair: _pair,
+            client: _client,
+            token0: _token0,
+            coefficient: _coefficient,
+            threshold: _threshold,
             status: OrderStatus.Active,
-            lastTriggeredAt: 0,
-            triggerCount: 0
+            triggered: false,
+            createdAt: block.timestamp,
+            updatedAt: block.timestamp
         });
         
-        // Add to pair's order list
-        pairOrders[pair].push(orderId);
+        userActiveOrders[_client].push(orderId);
         
-        // Subscribe to pair if this is the first order - USING CALLBACK MECHANISM
-        if (pairOrderCount[pair] == 0) {
-            _requestPairSubscription(pair, log.chain_id);
-        }
-        
-        pairOrderCount[pair]++;
-        
-        emit OrderTracked(pair, orderId, client);
-    }
-    
-    // Process order cancellation
-    function _processOrderCancelled(LogRecord calldata log) internal {
-        uint256 orderId = uint256(log.topic_1);
-        address client = address(uint160(log.topic_2));
-        
-        if (trackedOrders[orderId].id == orderId) {
-            address pair = trackedOrders[orderId].pair;
-            trackedOrders[orderId].status = OrderStatus.Cancelled;
-            
-            _decrementPairCount(pair);
-            
-            emit OrderUntracked(pair, orderId);
-        }
-    }
-    
-    // Process order execution
-    function _processOrderExecuted(LogRecord calldata log) internal {
-        uint256 orderId = uint256(log.topic_2);
-        
-        if (trackedOrders[orderId].id == orderId) {
-            address pair = trackedOrders[orderId].pair;
-            trackedOrders[orderId].status = OrderStatus.Executed;
-            
-            _decrementPairCount(pair);
-            
-            emit OrderUntracked(pair, orderId);
-        }
-    }
-    
-    // Process order pause
-    function _processOrderPaused(LogRecord calldata log) internal {
-        uint256 orderId = uint256(log.topic_1);
-        
-        if (trackedOrders[orderId].id == orderId) {
-            trackedOrders[orderId].status = OrderStatus.Paused;
-        }
-    }
-    
-    // Process order resume
-    function _processOrderResumed(LogRecord calldata log) internal {
-        uint256 orderId = uint256(log.topic_1);
-        
-        if (trackedOrders[orderId].id == orderId) {
-            trackedOrders[orderId].status = OrderStatus.Active;
-        }
-    }
-    
-    // Process Uniswap sync events - THE CORE LOGIC
-    function _processSyncEvent(LogRecord calldata log) internal {
-        address pair = log._contract;
-        Reserves memory reserves = abi.decode(log.data, (Reserves));
-        
-        // Get all orders for this pair
-        uint256[] storage orderIds = pairOrders[pair];
-        
-        for (uint i = 0; i < orderIds.length; i++) {
-            uint256 orderId = orderIds[i];
-            TrackedOrder storage order = trackedOrders[orderId];
-            
-            // Skip non-active orders
-            if (order.status != OrderStatus.Active) {
-                continue;
-            }
-            
-            // Check trigger cooldown
-            if (order.lastTriggeredAt > 0 && 
-                block.timestamp < order.lastTriggeredAt + TRIGGER_COOLDOWN) {
-                continue;
-            }
-            
-            // Check max trigger attempts
-            if (order.triggerCount >= MAX_TRIGGER_ATTEMPTS) {
-                order.status = OrderStatus.Failed;
-                emit ProcessingError("Max retries exceeded", orderId);
-                continue;
-            }
-            
-            // Check if price condition is met - THIS IS THE ONLY PLACE!
-            bool shouldTrigger = _isPriceConditionMet(
-                order.sellToken0,
-                reserves,
-                order.coefficient,
-                order.threshold
+        // Each order gets its own subscription
+        if (!vm) {
+            // Subscribe to pair sync events for this specific order
+            service.subscribe(
+                SEPOLIA_CHAIN_ID,
+                _pair,
+                UNISWAP_V2_SYNC_TOPIC_0,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE
             );
             
-            // Emit detailed debug event
-            uint256 calculated;
-            if (order.sellToken0) {
-                calculated = (uint256(reserves.reserve1) * order.coefficient) / uint256(reserves.reserve0);
-            } else {
-                calculated = (uint256(reserves.reserve0) * order.coefficient) / uint256(reserves.reserve1);
-            }
-            
-            emit ThresholdCheck(orderId, calculated, order.threshold, shouldTrigger, order.sellToken0);
-            
-            if (shouldTrigger) {
-                _triggerExecution(orderId, pair);
+            // Subscribe to callback events for execution confirmation
+            service.subscribe(
+                SEPOLIA_CHAIN_ID,
+                stop_order_callback,
+                STOP_ORDER_STOP_TOPIC_0,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE
+            );
+        }
+        emit StopOrderCreated(orderId, _pair, _client, _token0, _coefficient, _threshold);
+    }
+
+    function cancelStopOrder(uint256 orderId) external onlyDeployer {
+        require(stopOrders[orderId].client != address(0), "Order does not exist");
+        require(stopOrders[orderId].status == OrderStatus.Active, "Order not active");
+        require(!stopOrders[orderId].triggered, "Order already triggered");
+        
+        StopOrder storage order = stopOrders[orderId];
+        address pairToCheck = order.pair;
+        address clientToUpdate = order.client;
+        
+        order.status = OrderStatus.Cancelled;
+        order.updatedAt = block.timestamp;
+        
+        // Remove from active orders and add to cancelled orders
+        _removeFromUserActiveOrders(clientToUpdate, orderId);
+        userCancelledOrders[clientToUpdate].push(orderId);
+        
+        // Only unsubscribe from pair if no other active orders exist for this pair
+        if (!vm && !_hasActiveOrdersForPair(pairToCheck)) {
+            service.unsubscribe(
+                SEPOLIA_CHAIN_ID,
+                pairToCheck,
+                UNISWAP_V2_SYNC_TOPIC_0,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE
+            );
+        }
+        
+        emit StopOrderCancelled(orderId, clientToUpdate);
+    }
+
+    function _removeFromUserActiveOrders(address user, uint256 orderId) internal {
+        uint256[] storage activeOrders = userActiveOrders[user];
+        for (uint256 i = 0; i < activeOrders.length; i++) {
+            if (activeOrders[i] == orderId) {
+                activeOrders[i] = activeOrders[activeOrders.length - 1];
+                activeOrders.pop();
+                break;
             }
         }
     }
-    
-    // Check if price condition is met - THE AUTHORITATIVE CHECK
-    function _isPriceConditionMet(
-        bool sellToken0,
-        Reserves memory reserves,
-        uint256 coefficient,
-        uint256 threshold
-    ) internal pure returns (bool) {
-        if (sellToken0) {
-            return (uint256(reserves.reserve1) * coefficient) / uint256(reserves.reserve0) <= threshold;
+
+    // Helper function to check if there are any active orders for a specific pair
+    function _hasActiveOrdersForPair(address pair) internal view returns (bool) {
+        for (uint256 i = 1; i < nextOrderId; i++) {
+            if (stopOrders[i].status == OrderStatus.Active && 
+                !stopOrders[i].triggered && 
+                stopOrders[i].pair == pair) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Helper function to check if there are any active orders at all
+    function _hasAnyActiveOrders() internal view returns (bool) {
+        for (uint256 i = 1; i < nextOrderId; i++) {
+            if (stopOrders[i].status == OrderStatus.Active && 
+                !stopOrders[i].triggered) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // View functions for different order categories
+    function getUserActiveOrders(address user) external view returns (uint256[] memory) {
+        return userActiveOrders[user];
+    }
+
+    function getUserExecutedOrders(address user) external view returns (uint256[] memory) {
+        return userExecutedOrders[user];
+    }
+
+    function getUserCancelledOrders(address user) external view returns (uint256[] memory) {
+        return userCancelledOrders[user];
+    }
+
+    function getUserFailedOrders(address user) external view returns (uint256[] memory) {
+        return userFailedOrders[user];
+    }
+
+    function getAllUserOrders(address user) external view returns (
+        uint256[] memory active,
+        uint256[] memory executed,
+        uint256[] memory cancelled,
+        uint256[] memory failed
+    ) {
+        return (
+            userActiveOrders[user],
+            userExecutedOrders[user],
+            userCancelledOrders[user],
+            userFailedOrders[user]
+        );
+    }
+
+    function getStopOrder(uint256 orderId) external view returns (StopOrder memory) {
+        return stopOrders[orderId];
+    }
+
+    // View function to check deployer address
+    function getDeployer() external view returns (address) {
+        return deployer;
+    }
+
+    // Methods specific to ReactVM instance of the contract.
+    function react(LogRecord calldata log) external vmOnly {
+        if (log._contract == stop_order_callback) {
+            // Handle stop order execution results
+            if (log.topic_0 == STOP_ORDER_STOP_TOPIC_0) {
+                // The Stop event structure: Stop(address indexed pair, address indexed client, address indexed token, uint256 orderId, uint256[] tokens)
+                // We need to extract orderId from the data field since it's not indexed
+                // The data contains: orderId (uint256) + tokens[] (dynamic array)
+                
+                // Decode the data to extract orderId and tokens
+                (uint256 orderId, uint256[] memory tokens) = abi.decode(log.data, (uint256, uint256[]));
+                
+                StopOrder storage order = stopOrders[orderId];
+                
+                if (order.triggered && order.status == OrderStatus.Active) {
+                    address pairToCheck = order.pair;
+                    // Mark as executed and clean up
+                    order.status = OrderStatus.Executed;
+                    order.updatedAt = block.timestamp;
+                    
+                    // Move from active to executed
+                    _removeFromUserActiveOrders(order.client, orderId);
+                    userExecutedOrders[order.client].push(orderId);
+                    
+                    // Only unsubscribe from pair if no other active orders exist for this pair
+                    if (!_hasActiveOrdersForPair(pairToCheck)) {
+                        service.unsubscribe(
+                            SEPOLIA_CHAIN_ID,
+                            pairToCheck,
+                            UNISWAP_V2_SYNC_TOPIC_0,
+                            REACTIVE_IGNORE,
+                            REACTIVE_IGNORE,
+                            REACTIVE_IGNORE
+                        );
+                    }
+                    
+                    // Only unsubscribe from callback contract if no active orders remain at all
+                    if (!_hasAnyActiveOrders()) {
+                        service.unsubscribe(
+                            SEPOLIA_CHAIN_ID,
+                            stop_order_callback,
+                            STOP_ORDER_STOP_TOPIC_0,
+                            REACTIVE_IGNORE,
+                            REACTIVE_IGNORE,
+                            REACTIVE_IGNORE
+                        );
+                    }
+                    
+                    emit OrderCompleted(orderId);
+                }
+            }
         } else {
-            return (uint256(reserves.reserve0) * coefficient) / uint256(reserves.reserve1) <= threshold;
-        }
-    }
-    
-    // Trigger order execution
-    function _triggerExecution(uint256 orderId, address pair) internal {
-        TrackedOrder storage order = trackedOrders[orderId];
-        
-        // Update trigger tracking
-        order.lastTriggeredAt = block.timestamp;
-        order.triggerCount++;
-        
-        // Create callback payload
-        bytes memory payload = abi.encodeWithSignature(
-            "executeStopOrder(address,uint256)",
-            address(0), // sender is ignored in callback
-            orderId
-        );
-        
-        // Emit callback to Sepolia chain
-        emit Callback(SEPOLIA_CHAIN_ID, stopOrderCallback, CALLBACK_GAS_LIMIT, payload);
-        
-        emit ExecutionTriggered(orderId, pair, true);
-    }
-    
-    // DYNAMIC SUBSCRIPTION MANAGEMENT USING CALLBACK MECHANISM
-    
-    // Request pair subscription using callback mechanism
-    function _requestPairSubscription(address pair, uint256 chainId) internal {
-        if (!subscribedPairs[pair]) {
-            // Create a callback to subscribe on the Reactive Network
-            bytes memory payload = abi.encodeWithSignature(
-                "subscribeToPair(address,address,uint256)",
-                address(0),
-                pair,
-                chainId
-            );
+            // Handle sync events from Uniswap pairs
+            Reserves memory sync = abi.decode(log.data, (Reserves));
             
-            // Emit callback to Reactive Network to handle the subscription
-            emit Callback(REACTIVE_CHAIN_ID, address(this), CALLBACK_GAS_LIMIT, payload);
-            
-            // Mark as requested (will be confirmed when subscription is active)
-            subscribedPairs[pair] = true;
-            emit PairSubscribed(pair);
-        }
-    }
-    
-    // Request pair unsubscription using callback mechanism
-    function _requestPairUnsubscription(address pair, uint256 chainId) internal {
-        if (subscribedPairs[pair]) {
-            // Create a callback to unsubscribe on the Reactive Network
-            bytes memory payload = abi.encodeWithSignature(
-                "unsubscribeFromPair(address,address,uint256)",
-                address(0),
-                pair,
-                chainId
-            );
-            
-            // Emit callback to Reactive Network to handle the unsubscription
-            emit Callback(REACTIVE_CHAIN_ID, address(this), CALLBACK_GAS_LIMIT, payload);
-            
-            // Mark as requested (will be confirmed when unsubscription is processed)
-            subscribedPairs[pair] = false;
-            emit PairUnsubscribed(pair);
-        }
-    }
-    
-    // Methods for Reactive Network to execute subscription (via callback)
-    function subscribeToPair(address /*sender*/, address pair, uint256 chainId) external rnOnly {
-        // Execute the subscription
-        service.subscribe(
-            chainId,
-            pair,
-            UNISWAP_V2_SYNC_TOPIC_0,
-            REACTIVE_IGNORE,
-            REACTIVE_IGNORE,
-            REACTIVE_IGNORE
-        );
-    }
-    
-    // Methods for Reactive Network to execute unsubscription (via callback)
-    function unsubscribeFromPair(address /*sender*/, address pair, uint256 chainId) external rnOnly {
-        // Execute the unsubscription
-        service.unsubscribe(
-            chainId,
-            pair,
-            UNISWAP_V2_SYNC_TOPIC_0,
-            REACTIVE_IGNORE,
-            REACTIVE_IGNORE,
-            REACTIVE_IGNORE
-        );
-    }
-    
-    // Decrement pair order count and unsubscribe if needed
-    function _decrementPairCount(address pair) internal {
-        if (pairOrderCount[pair] > 0) {
-            pairOrderCount[pair]--;
-            
-            // Unsubscribe if no more active orders
-            if (pairOrderCount[pair] == 0) {
-                _requestPairUnsubscription(pair, SEPOLIA_CHAIN_ID);
+            // Check all active orders for this pair
+            for (uint256 i = 1; i < nextOrderId; i++) {
+                StopOrder storage order = stopOrders[i];
+                
+                if (order.status == OrderStatus.Active && 
+                    !order.triggered && 
+                    order.pair == log._contract &&
+                    below_threshold(order, sync)) {
+                    
+                    emit CallbackSent(i);
+                    bytes memory payload = abi.encodeWithSignature(
+                        "stop(address,address,address,bool,uint256,uint256,uint256)",
+                        address(0),
+                        order.pair,
+                        order.client,
+                        order.token0,
+                        order.coefficient,
+                        order.threshold,
+                        i
+                    );
+                    order.triggered = true;
+                    order.updatedAt = block.timestamp;
+                    emit Callback(log.chain_id, stop_order_callback, CALLBACK_GAS_LIMIT, payload);
+                }
             }
         }
     }
-    
-    // View functions
-    function getTrackedOrder(uint256 orderId) external view returns (TrackedOrder memory) {
-        return trackedOrders[orderId];
-    }
-    
-    function getPairOrderCount(address pair) external view returns (uint256) {
-        return pairOrderCount[pair];
-    }
-    
-    function isPairSubscribed(address pair) external view returns (bool) {
-        return subscribedPairs[pair];
-    }
-    
-    function getPairOrders(address pair) external view returns (uint256[] memory) {
-        return pairOrders[pair];
+
+    function below_threshold(StopOrder memory order, Reserves memory sync) internal pure returns (bool) {
+        if (order.token0) {
+            return (sync.reserve1 * order.coefficient) / sync.reserve0 <= order.threshold;
+        } else {
+            return (sync.reserve0 * order.coefficient) / sync.reserve1 <= order.threshold;
+        }
     }
 }
