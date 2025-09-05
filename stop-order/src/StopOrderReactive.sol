@@ -47,6 +47,9 @@ contract UniswapDemoStopOrderReactive is IReactive, AbstractReactive {
     event CallbackSent(uint256 indexed orderId);
     event OrderCompleted(uint256 indexed orderId);
     event OrderFailed(uint256 indexed orderId, string reason);
+    
+    // Withdrawal events
+    event ETHWithdrawn(address indexed to, uint256 amount);
 
     uint256 private constant SEPOLIA_CHAIN_ID = 11155111;
     uint256 private constant UNISWAP_V2_SYNC_TOPIC_0 = 0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1;
@@ -180,6 +183,31 @@ contract UniswapDemoStopOrderReactive is IReactive, AbstractReactive {
         emit StopOrderCancelled(orderId, clientToUpdate);
     }
 
+    // Emergency withdrawal functions - only deployer can call
+    function withdrawETH(address payable to, uint256 amount) external onlyDeployer {
+        require(to != address(0), "Invalid recipient address");
+        require(amount <= address(this).balance, "Insufficient ETH balance");
+        
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "ETH transfer failed");
+        
+        emit ETHWithdrawn(to, amount);
+    }
+
+
+    function withdrawAllETH(address payable to) external onlyDeployer {
+        require(to != address(0), "Invalid recipient address");
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to withdraw");
+        
+        (bool success, ) = to.call{value: balance}("");
+        require(success, "ETH transfer failed");
+        
+        emit ETHWithdrawn(to, balance);
+    }
+
+  
+
     function _removeFromUserActiveOrders(address user, uint256 orderId) internal {
         uint256[] storage activeOrders = userActiveOrders[user];
         for (uint256 i = 0; i < activeOrders.length; i++) {
@@ -253,6 +281,8 @@ contract UniswapDemoStopOrderReactive is IReactive, AbstractReactive {
     function getDeployer() external view returns (address) {
         return deployer;
     }
+
+    
 
     // Methods specific to ReactVM instance of the contract.
     function react(LogRecord calldata log) external vmOnly {
@@ -344,4 +374,5 @@ contract UniswapDemoStopOrderReactive is IReactive, AbstractReactive {
             return (sync.reserve0 * order.coefficient) / sync.reserve1 <= order.threshold;
         }
     }
+
 }

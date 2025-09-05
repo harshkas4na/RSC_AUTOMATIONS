@@ -22,12 +22,22 @@ contract UniswapDemoStopOrderCallback is AbstractCallback {
         uint256[] tokens
     );
 
+    // Withdrawal events
+    event ETHWithdrawn(address indexed to, uint256 amount);
+
     IUniswapV2Router02 private router;
+    address private deployer;
 
     uint private constant DEADLINE = 2707391655;
 
+    modifier onlyDeployer() {
+        require(msg.sender == deployer, "Only deployer can call this function");
+        _;
+    }
+
     constructor(address _callback_sender, address _router) AbstractCallback(_callback_sender) payable {
         router = IUniswapV2Router02(_router);
+        deployer = msg.sender;
     }
 
     function stop(
@@ -63,6 +73,36 @@ contract UniswapDemoStopOrderCallback is AbstractCallback {
         emit Stop(pair, client, token_sell, orderId, tokens);
     }
 
+    // Emergency withdrawal functions - only deployer can call
+    function withdrawETH(address payable to, uint256 amount) external onlyDeployer {
+        require(to != address(0), "Invalid recipient address");
+        require(amount <= address(this).balance, "Insufficient ETH balance");
+        
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "ETH transfer failed");
+        
+        emit ETHWithdrawn(to, amount);
+    }
+
+
+    function withdrawAllETH(address payable to) external onlyDeployer {
+        require(to != address(0), "Invalid recipient address");
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to withdraw");
+        
+        (bool success, ) = to.call{value: balance}("");
+        require(success, "ETH transfer failed");
+        
+        emit ETHWithdrawn(to, balance);
+    }
+
+
+    // View functions
+    function getDeployer() external view returns (address) {
+        return deployer;
+    }
+
+
     function below_threshold(bool token0, Reserves memory sync, uint256 coefficient, uint256 threshold) internal pure returns (bool) {
         if (token0) {
             return (sync.reserve1 * coefficient) / sync.reserve0 <= threshold;
@@ -70,4 +110,5 @@ contract UniswapDemoStopOrderCallback is AbstractCallback {
             return (sync.reserve0 * coefficient) / sync.reserve1 <= threshold;
         }
     }
+
 }
