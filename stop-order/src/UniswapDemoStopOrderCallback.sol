@@ -3,6 +3,8 @@ pragma solidity >=0.8.0;
 
 import "../lib/reactive-lib/src/abstract-base/AbstractCallback.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import "../lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 import "../lib/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "../lib/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 
@@ -12,6 +14,9 @@ import "../lib/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
  * @dev Each user deploys their own instance for complete control and privacy
  */
 contract PersonalStopOrderCallback is AbstractCallback {
+
+    using SafeERC20 for IERC20;
+
     // Events
     event StopOrderCreated(
         address indexed pair,
@@ -41,6 +46,8 @@ contract PersonalStopOrderCallback is AbstractCallback {
         uint256 indexed orderId,
         string reason
     );
+
+    event ETHWithdrawn(address indexed to, uint256 amount);
     
     // Order status enum
     enum OrderStatus { Active, Paused, Cancelled, Executed, Failed }
@@ -338,14 +345,6 @@ contract PersonalStopOrderCallback is AbstractCallback {
         return activeOrders;
     }
     
-    /**
-     * @notice Gets order details
-     * @param orderId The order ID
-     * @return The complete order struct
-     */
-    function getOrder(uint256 orderId) external view validOrder(orderId) returns (StopOrder memory) {
-        return stopOrders[orderId];
-    }
     
     /**
      * @notice Gets current price ratio for a pair (for informational purposes only)
@@ -358,9 +357,9 @@ contract PersonalStopOrderCallback is AbstractCallback {
         require(reserve0 > 0 && reserve1 > 0, "No liquidity");
         
         if (sellToken0) {
-            return (uint256(reserve1) * 1e18) / uint256(reserve0);
+            return Math.mulDiv(uint256(reserve1), 1e18, uint256(reserve0));
         } else {
-            return (uint256(reserve0) * 1e18) / uint256(reserve1);
+            return Math.mulDiv(uint256(reserve0), 1e18, uint256(reserve1));
         }
     }
     
@@ -387,37 +386,38 @@ contract PersonalStopOrderCallback is AbstractCallback {
      * @return amountOut Amount received
      */
     function _performSwap(
-        address tokenSell,
-        address tokenBuy,
-        uint256 amount
-    ) external returns (uint256 amountOut) {
-        require(msg.sender == address(this), "Internal function only");
-        
-        // Step 1: Transfer tokens from owner to contract
-        require(IERC20(tokenSell).transferFrom(owner, address(this), amount), "Transfer failed");
-        
-        // Step 2: Approve router
-        require(IERC20(tokenSell).approve(address(router), amount), "Approval failed");
-        
-        // Step 3: Execute swap to contract first
-        address[] memory path = new address[](2);
-        path[0] = tokenSell;
-        path[1] = tokenBuy;
-        
-        uint256[] memory amounts = router.swapExactTokensForTokens(
-            amount,
-            0,
-            path,
-            address(this),
-            block.timestamp + DEADLINE_OFFSET
-        );
-        
-        // Step 4: Transfer received tokens to owner
-        amountOut = amounts[1];
-        require(IERC20(tokenBuy).transfer(owner, amountOut), "Final transfer failed");
-        
-        return amountOut;
-    }
+    address tokenSell,
+    address tokenBuy,
+    uint256 amount
+) external returns (uint256 amountOut) {
+    require(msg.sender == address(this), "Internal function only");
+    
+    // Step 1: Transfer tokens from owner to contract
+    IERC20(tokenSell).safeTransferFrom(owner, address(this), amount);
+    
+    // Step 2: Approve router
+    IERC20(tokenSell).safeApprove(address(router), amount);
+    
+    // Step 3: Execute swap to contract first
+    address[] memory path = new address[](2);
+    path[0] = tokenSell;
+    path[1] = tokenBuy;
+    
+    uint256[] memory amounts = router.swapExactTokensForTokens(
+        amount,
+        0,
+        path,
+        address(this),
+        block.timestamp + DEADLINE_OFFSET
+    );
+    
+    // Step 4: Transfer received tokens to owner
+    amountOut = amounts[1];
+    IERC20(tokenBuy).safeTransfer(owner, amountOut);
+    
+    return amountOut;
+}
+
     
     /**
      * @notice Checks if the current on-chain price is below the order's threshold
@@ -437,10 +437,10 @@ contract PersonalStopOrderCallback is AbstractCallback {
     ) internal pure returns (bool) {
         if (sellToken0) {
             // Price of token0 in terms of token1
-            return (uint256(reserve1) * coefficient) / uint256(reserve0) <= threshold;
+            return Math.mulDiv(uint256(reserve1), coefficient, uint256(reserve0)) <= threshold;
         } else {
             // Price of token1 in terms of token0
-            return (uint256(reserve0) * coefficient) / uint256(reserve1) <= threshold;
+            return Math.mulDiv(uint256(reserve0), coefficient, uint256(reserve1)) <= threshold;
         }
     }
     
@@ -450,32 +450,31 @@ contract PersonalStopOrderCallback is AbstractCallback {
      * @param amount Amount to recover (0 for full balance)
      */
     function emergencyRecoverToken(address token, uint256 amount) external onlyOwner {
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        uint256 recoverAmount = amount == 0 ? balance : amount;
-        require(recoverAmount <= balance, "Insufficient balance to recover");
-        require(IERC20(token).transfer(owner, recoverAmount), "Recovery transfer failed");
+    uint256 balance = IERC20(token).balanceOf(address(this));
+    uint256 recoverAmount = amount == 0 ? balance : amount;
+    require(recoverAmount <= balance, "Insufficient balance to recover");
+    IERC20(token).safeTransfer(owner, recoverAmount);
     }
+
 
     // Emergency withdrawal functions - only deployer can call
-    function withdrawETH(address payable to, uint256 amount) external onlyOwner {
-        require(to != address(0), "Invalid recipient address");
-        require(amount <= address(this).balance, "Insufficient ETH balance");
-        
-        (bool success, ) = to.call{value: amount}("");
-        require(success, "ETH transfer failed");
-        
-        emit ETHWithdrawn(to, amount);
+    function withdrawETH(uint256 amount) external onlyOwner {
+    require(amount <= address(this).balance, "Insufficient ETH balance");
+    
+    (bool success, ) = payable(msg.sender).call{value: amount}("");
+    require(success, "ETH transfer failed");
+    
+    emit ETHWithdrawn(payable(msg.sender), amount);
     }
 
 
-    function withdrawAllETH(address payable to) external onlyOwner {
-        require(to != address(0), "Invalid recipient address");
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No ETH to withdraw");
-        
-        (bool success, ) = to.call{value: balance}("");
-        require(success, "ETH transfer failed");
-        
-        emit ETHWithdrawn(to, balance);
+    function withdrawAllETH() external onlyOwner {
+    uint256 balance = address(this).balance;
+    require(balance > 0, "No ETH to withdraw");
+    
+    (bool success, ) = payable(msg.sender).call{value: balance}("");
+    require(success, "ETH transfer failed");
+    
+    emit ETHWithdrawn(payable(msg.sender), balance);
     }
 }
