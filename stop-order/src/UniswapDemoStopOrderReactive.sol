@@ -3,6 +3,8 @@ pragma solidity >=0.8.0;
 
 import "../lib/reactive-lib/src/interfaces/IReactive.sol";
 import "../lib/reactive-lib/src/abstract-base/AbstractReactive.sol";
+import "../lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
+
 
 /**
  * @title PersonalStopOrderReactive
@@ -307,9 +309,9 @@ contract PersonalStopOrderReactive is IReactive, AbstractReactive {
             // Emit detailed debug event
             uint256 calculated;
             if (order.sellToken0) {
-                calculated = (uint256(reserves.reserve1) * order.coefficient) / uint256(reserves.reserve0);
+                calculated = Math.mulDiv(uint256(reserves.reserve1), order.coefficient, uint256(reserves.reserve0));
             } else {
-                calculated = (uint256(reserves.reserve0) * order.coefficient) / uint256(reserves.reserve1);
+                calculated = Math.mulDiv(uint256(reserves.reserve0), order.coefficient, uint256(reserves.reserve1));
             }
             
             emit ThresholdCheck(orderId, calculated, order.threshold, shouldTrigger, order.sellToken0);
@@ -328,9 +330,9 @@ contract PersonalStopOrderReactive is IReactive, AbstractReactive {
         uint256 threshold
     ) internal pure returns (bool) {
         if (sellToken0) {
-            return (uint256(reserves.reserve1) * coefficient) / uint256(reserves.reserve0) <= threshold;
+            return Math.mulDiv(uint256(reserves.reserve1), coefficient, uint256(reserves.reserve0)) <= threshold;
         } else {
-            return (uint256(reserves.reserve0) * coefficient) / uint256(reserves.reserve1) <= threshold;
+            return Math.mulDiv(uint256(reserves.reserve0), coefficient, uint256(reserves.reserve1)) <= threshold;
         }
     }
     
@@ -503,23 +505,18 @@ contract PersonalStopOrderReactive is IReactive, AbstractReactive {
         return activeOrders;
     }
     // Emergency withdrawal functions - only deployer can call
-    function withdrawETH(address payable to, uint256 amount) external onlyOwner {
-        require(to != address(0), "Invalid recipient address");
+    function withdrawETH(uint256 amount) external onlyOwner {
         require(amount <= address(this).balance, "Insufficient ETH balance");
         
-        (bool success, ) = to.call{value: amount}("");
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
         require(success, "ETH transfer failed");
-        
     }
 
-
-    function withdrawAllETH(address payable to) external onlyOwner {
-        require(to != address(0), "Invalid recipient address");
+    function withdrawAllETH() external onlyOwner {
         uint256 balance = address(this).balance;
         require(balance > 0, "No ETH to withdraw");
         
-        (bool success, ) = to.call{value: balance}("");
+        (bool success, ) = payable(msg.sender).call{value: balance}("");
         require(success, "ETH transfer failed");
-        
     }
 }
