@@ -7,6 +7,7 @@ import "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol"
 import "../lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 import "../lib/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "../lib/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
+import "../lib/v2-periphery/contracts/libraries/UniswapV2Library.sol";
 
 /**
  * @title PersonalStopOrderCallback
@@ -351,19 +352,19 @@ contract PersonalStopOrderCallback is AbstractCallback {
     
     
     /**
-     * @notice Gets current price ratio for a pair (for informational purposes only)
-     * @param pair The pair address
-     * @param sellToken0 Whether selling token0
-     * @return The current price ratio
-     */
+    * @notice Gets current price ratio for a pair (for informational purposes only)
+    * @param pair The pair address
+    * @param sellToken0 Whether selling token0
+    * @return The current price ratio
+    */
     function getCurrentPrice(address pair, bool sellToken0) external view returns (uint256) {
         (uint112 reserve0, uint112 reserve1,) = IUniswapV2Pair(pair).getReserves();
         require(reserve0 > 0 && reserve1 > 0, "No liquidity");
         
         if (sellToken0) {
-            return Math.mulDiv(uint256(reserve1), 1e18, uint256(reserve0));
+            return UniswapV2Library.quote(1, uint256(reserve0), uint256(reserve1));
         } else {
-            return Math.mulDiv(uint256(reserve0), 1e18, uint256(reserve1));
+            return UniswapV2Library.quote(1, uint256(reserve1), uint256(reserve0));
         }
     }
     
