@@ -4,6 +4,8 @@ pragma solidity >=0.8.0;
 import "../lib/reactive-lib/src/interfaces/IReactive.sol";
 import "../lib/reactive-lib/src/abstract-base/AbstractReactive.sol";
 import "../lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
+import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 
 
 /**
@@ -87,10 +89,10 @@ contract PersonalStopOrderReactive is IReactive, AbstractReactive {
     address public immutable stopOrderCallback;
     
     // Order tracking
-    mapping(uint256 => TrackedOrder) private trackedOrders;
-    mapping(address => uint256[]) private pairOrders; // pair -> orderIds
-    mapping(address => uint256) private pairOrderCount;
-    mapping(address => bool) private subscribedPairs;
+    mapping(uint256 => TrackedOrder) public trackedOrders;
+    mapping(address => uint256[]) public pairOrders; // pair -> orderIds
+    mapping(address => uint256) public pairOrderCount;
+    mapping(address => bool) public subscribedPairs;
     
     // Constants for retry logic
     uint256 private constant TRIGGER_COOLDOWN = 300; // 5 minutes between triggers
@@ -463,23 +465,6 @@ contract PersonalStopOrderReactive is IReactive, AbstractReactive {
         emit PairUnsubscribed(pair);
     }
     
-    // View functions
-    function getTrackedOrder(uint256 orderId) external view returns (TrackedOrder memory) {
-        return trackedOrders[orderId];
-    }
-    
-    function getPairOrderCount(address pair) external view returns (uint256) {
-        return pairOrderCount[pair];
-    }
-    
-    function isPairSubscribed(address pair) external view returns (bool) {
-        return subscribedPairs[pair];
-    }
-    
-    function getPairOrders(address pair) external view returns (uint256[] memory) {
-        return pairOrders[pair];
-    }
-    
     function getActiveOrdersForPair(address pair) external view returns (uint256[] memory) {
         uint256[] storage allOrders = pairOrders[pair];
         uint256 activeCount = 0;
@@ -504,6 +489,19 @@ contract PersonalStopOrderReactive is IReactive, AbstractReactive {
         
         return activeOrders;
     }
+
+    function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+    require(to != address(0), "Invalid recipient address");
+    SafeERC20.safeTransfer(IERC20(token), to, amount);
+    }
+
+    function rescueAllERC20(address token, address to) external onlyOwner {
+        require(to != address(0), "Invalid recipient address");
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance > 0, "No tokens to rescue");
+        SafeERC20.safeTransfer(IERC20(token), to, balance);
+    }
+
     // Emergency withdrawal functions - only deployer can call
     function withdrawETH(uint256 amount) external onlyOwner {
         require(amount <= address(this).balance, "Insufficient ETH balance");
