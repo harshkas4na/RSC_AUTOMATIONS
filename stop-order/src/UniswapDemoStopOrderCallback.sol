@@ -43,10 +43,11 @@ contract PersonalStopOrderCallback is AbstractCallback {
     event StopOrderPaused(uint256 indexed orderId);
     event StopOrderResumed(uint256 indexed orderId);
     
-    event ExecutionFailed(
-        uint256 indexed orderId,
-        string reason
-    );
+    error OrderNotActive(uint256 orderId);
+    error PriceConditionNotMet(uint256 orderId);
+    error MaxRetriesExceeded(uint256 orderId);
+    error InsufficientBalanceOrAllowance(uint256 orderId);
+    error SwapExecutionFailed(uint256 orderId);
 
     event ETHWithdrawn(address indexed to, uint256 amount);
     
@@ -192,8 +193,7 @@ contract PersonalStopOrderCallback is AbstractCallback {
         
         // Check order status
         if (order.status != OrderStatus.Active) {
-            emit ExecutionFailed(orderId, "Order is not active");
-            return;
+            revert OrderNotActive(orderId);
         }
 
         // Final on-chain price check
@@ -212,8 +212,7 @@ contract PersonalStopOrderCallback is AbstractCallback {
         // Check max retries
         if (order.retryCount >= MAX_RETRIES) {
             order.status = OrderStatus.Failed;
-            emit ExecutionFailed(orderId, "Max retries exceeded");
-            return;
+            revert MaxRetriesExceeded(orderId);
         }
         
         // Update execution attempt
@@ -231,11 +230,9 @@ contract PersonalStopOrderCallback is AbstractCallback {
         if (ownerAllowance < executeAmount) {
             executeAmount = ownerAllowance;
         }
-        
         if (executeAmount < MIN_AMOUNT) {
             order.status = OrderStatus.Failed;
-            emit ExecutionFailed(orderId, "Insufficient balance or allowance");
-            return;
+            revert InsufficientBalanceOrAllowance(orderId);
         }
         
         // Execute the swap
@@ -253,8 +250,8 @@ contract PersonalStopOrderCallback is AbstractCallback {
                 executeAmount,
                 amountOut
             );
-        } else {
-            emit ExecutionFailed(orderId, "Swap execution failed");
+        }else {
+            revert SwapExecutionFailed(orderId);
         }
     }
     
