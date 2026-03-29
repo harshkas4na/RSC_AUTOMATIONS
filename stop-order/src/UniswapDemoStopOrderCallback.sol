@@ -6,12 +6,16 @@ import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "../lib/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "../lib/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 
-contract StopOrderCallback is AbstractCallback {
+/**
+ * @title PersonalStopOrderCallback
+ * @notice Personal stop order system for individual users
+ * @dev Each user deploys their own instance for complete control and privacy
+ */
+contract PersonalStopOrderCallback is AbstractCallback {
     // Events
     event StopOrderCreated(
         address indexed pair,
         uint256 indexed orderId,
-        address indexed client,
         bool sellToken0,
         address tokenSell,
         address tokenBuy,
@@ -23,27 +27,15 @@ contract StopOrderCallback is AbstractCallback {
     event StopOrderExecuted(
         address indexed pair,
         uint256 indexed orderId,
-        address indexed client,
         address tokenSell,
         address tokenBuy,
         uint256 amountIn,
         uint256 amountOut
     );
     
-    event StopOrderCancelled(
-        uint256 indexed orderId,
-        address indexed client
-    );
-    
-    event StopOrderPaused(
-        uint256 indexed orderId,
-        address indexed client
-    );
-    
-    event StopOrderResumed(
-        uint256 indexed orderId,
-        address indexed client
-    );
+    event StopOrderCancelled(uint256 indexed orderId);
+    event StopOrderPaused(uint256 indexed orderId);
+    event StopOrderResumed(uint256 indexed orderId);
     
     event ExecutionFailed(
         uint256 indexed orderId,
@@ -56,7 +48,6 @@ contract StopOrderCallback is AbstractCallback {
     // Stop order struct
     struct StopOrder {
         uint256 id;
-        address client;
         address pair;
         address tokenSell;
         address tokenBuy;
@@ -72,21 +63,22 @@ contract StopOrderCallback is AbstractCallback {
     }
     
     // State variables
+    address public immutable owner;
     IUniswapV2Router02 public immutable router;
     
     mapping(uint256 => StopOrder) public stopOrders;
-    mapping(address => uint256[]) public userOrders;
+    uint256[] public orderIds; // Track all order IDs for easy enumeration
     uint256 public nextOrderId;
     
     // Configuration
     uint256 private constant DEADLINE_OFFSET = 300; // 5 minutes
     uint8 private constant MAX_RETRIES = 3;
-    uint256 private constant RETRY_COOLDOWN = 30; // 30 sec
+    uint256 private constant RETRY_COOLDOWN = 30; // 30 seconds
     uint256 private constant MIN_AMOUNT = 1000; // Minimum amount to prevent dust
     
     // Modifiers
-    modifier onlyOrderOwner(uint256 orderId) {
-        require(stopOrders[orderId].client == msg.sender, "Not order owner");
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this");
         _;
     }
     
@@ -96,9 +88,11 @@ contract StopOrderCallback is AbstractCallback {
     }
     
     constructor(
+        address _owner,
         address _callbackSender,
         address _router
     ) AbstractCallback(_callbackSender) payable {
+        owner = _owner;
         router = IUniswapV2Router02(_router);
     }
     
@@ -110,13 +104,13 @@ contract StopOrderCallback is AbstractCallback {
      * @param coefficient Price calculation coefficient
      * @param threshold Price threshold that triggers the order
      */
-    function createStopOrder (
+    function createStopOrder(
         address pair,
         bool sellToken0,
         uint256 amount,
         uint256 coefficient,
         uint256 threshold
-    ) external payable returns (uint256) {
+    ) external onlyOwner returns (uint256) {
         require(pair != address(0), "Invalid pair address");
         require(amount >= MIN_AMOUNT, "Amount too small");
         require(coefficient > 0 && threshold > 0, "Invalid price parameters");
@@ -129,11 +123,11 @@ contract StopOrderCallback is AbstractCallback {
         address tokenBuy = sellToken0 ? token1 : token0;
         
         // Verify user has sufficient balance
-        require(IERC20(tokenSell).balanceOf(msg.sender) >= amount, "Insufficient balance");
+        require(IERC20(tokenSell).balanceOf(owner) >= amount, "Insufficient balance");
         
         // Verify user has approved sufficient amount
         require(
-            IERC20(tokenSell).allowance(msg.sender, address(this)) >= amount,
+            IERC20(tokenSell).allowance(owner, address(this)) >= amount,
             "Insufficient allowance"
         );
         
@@ -145,7 +139,6 @@ contract StopOrderCallback is AbstractCallback {
         uint256 orderId = nextOrderId;
         stopOrders[orderId] = StopOrder({
             id: orderId,
-            client: msg.sender,
             pair: pair,
             tokenSell: tokenSell,
             tokenBuy: tokenBuy,
@@ -160,15 +153,13 @@ contract StopOrderCallback is AbstractCallback {
             lastExecutionAttempt: 0
         });
         
-        // Add to user's orders
-        userOrders[msg.sender].push(orderId);
-        
+        // Add to order tracking
+        orderIds.push(orderId);
         nextOrderId++;
         
         emit StopOrderCreated(
             pair,
             orderId,
-            msg.sender,
             sellToken0,
             tokenSell,
             tokenBuy,
@@ -180,9 +171,9 @@ contract StopOrderCallback is AbstractCallback {
         return orderId;
     }
     
-    /*
+    /**
      * @notice Executes a stop order (called by RSC)
-     * @dev REMOVED ALL THRESHOLD CHECKING - WE TRUST THE RSC COMPLETELY
+     * @dev Includes an on-chain price check as a final safeguard before execution
      * @param sender The address triggering the execution
      * @param orderId The ID of the order to execute
      */
@@ -192,16 +183,23 @@ contract StopOrderCallback is AbstractCallback {
     ) external authorizedSenderOnly validOrder(orderId) {
         StopOrder storage order = stopOrders[orderId];
         
-        // ONLY CHECK: Order status - NO PRICE VALIDATION!
+        // Check order status
         if (order.status != OrderStatus.Active) {
             emit ExecutionFailed(orderId, "Order is not active");
             return;
         }
+
+        // Final on-chain price check
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(order.pair).getReserves();
+        require(
+            _isBelowThreshold(order.sellToken0, reserve0, reserve1, order.coefficient, order.threshold),
+            "Price condition not met"
+        );
         
         // Check retry cooldown
         if (order.lastExecutionAttempt > 0 && 
             block.timestamp < order.lastExecutionAttempt + RETRY_COOLDOWN) {
-            return; // Skip execution if in cooldown
+            return;
         }
         
         // Check max retries
@@ -215,21 +213,16 @@ contract StopOrderCallback is AbstractCallback {
         order.lastExecutionAttempt = block.timestamp;
         order.retryCount++;
         
-        // REMOVED: Threshold checking - RSC is our authoritative price oracle!
-        // NO MORE: _isBelowThreshold() calls
-        // NO MORE: "Price above threshold" failures
-        // The RSC has already validated the price condition!
-        
-        // Check user still has sufficient balance and allowance
-        uint256 userBalance = IERC20(order.tokenSell).balanceOf(order.client);
-        uint256 userAllowance = IERC20(order.tokenSell).allowance(order.client, address(this));
+        // Check owner still has sufficient balance and allowance
+        uint256 ownerBalance = IERC20(order.tokenSell).balanceOf(owner);
+        uint256 ownerAllowance = IERC20(order.tokenSell).allowance(owner, address(this));
         
         uint256 executeAmount = order.amount;
-        if (userBalance < executeAmount) {
-            executeAmount = userBalance;
+        if (ownerBalance < executeAmount) {
+            executeAmount = ownerBalance;
         }
-        if (userAllowance < executeAmount) {
-            executeAmount = userAllowance;
+        if (ownerAllowance < executeAmount) {
+            executeAmount = ownerAllowance;
         }
         
         if (executeAmount < MIN_AMOUNT) {
@@ -238,8 +231,8 @@ contract StopOrderCallback is AbstractCallback {
             return;
         }
         
-        // Execute the swap - NO ADDITIONAL PRICE VALIDATION!
-        bool success = _executeSwap(order, executeAmount);
+        // Execute the swap
+        (bool success, uint256 amountOut) = _executeSwap(order, executeAmount);
         
         if (success) {
             order.status = OrderStatus.Executed;
@@ -248,11 +241,10 @@ contract StopOrderCallback is AbstractCallback {
             emit StopOrderExecuted(
                 order.pair,
                 orderId,
-                order.client,
                 order.tokenSell,
                 order.tokenBuy,
                 executeAmount,
-                0 // amountOut will be in the Swap event from Uniswap
+                amountOut
             );
         } else {
             emit ExecutionFailed(orderId, "Swap execution failed");
@@ -265,8 +257,8 @@ contract StopOrderCallback is AbstractCallback {
      */
     function cancelStopOrder(uint256 orderId) 
         external 
+        onlyOwner
         validOrder(orderId) 
-        onlyOrderOwner(orderId) 
     {
         StopOrder storage order = stopOrders[orderId];
         require(
@@ -275,8 +267,7 @@ contract StopOrderCallback is AbstractCallback {
         );
         
         order.status = OrderStatus.Cancelled;
-        
-        emit StopOrderCancelled(orderId, msg.sender);
+        emit StopOrderCancelled(orderId);
     }
     
     /**
@@ -285,15 +276,14 @@ contract StopOrderCallback is AbstractCallback {
      */
     function pauseStopOrder(uint256 orderId) 
         external 
+        onlyOwner
         validOrder(orderId) 
-        onlyOrderOwner(orderId) 
     {
         StopOrder storage order = stopOrders[orderId];
         require(order.status == OrderStatus.Active, "Order is not active");
         
         order.status = OrderStatus.Paused;
-        
-        emit StopOrderPaused(orderId, msg.sender);
+        emit StopOrderPaused(orderId);
     }
     
     /**
@@ -302,24 +292,50 @@ contract StopOrderCallback is AbstractCallback {
      */
     function resumeStopOrder(uint256 orderId) 
         external 
+        onlyOwner
         validOrder(orderId) 
-        onlyOrderOwner(orderId) 
     {
         StopOrder storage order = stopOrders[orderId];
         require(order.status == OrderStatus.Paused, "Order is not paused");
         
         order.status = OrderStatus.Active;
-        
-        emit StopOrderResumed(orderId, msg.sender);
+        emit StopOrderResumed(orderId);
     }
     
     /**
-     * @notice Gets user's orders
-     * @param user The user address
-     * @return Array of order IDs
+     * @notice Gets all order IDs
+     * @return Array of all order IDs
      */
-    function getUserOrders(address user) external view returns (uint256[] memory) {
-        return userOrders[user];
+    function getAllOrders() external view returns (uint256[] memory) {
+        return orderIds;
+    }
+    
+    /**
+     * @notice Gets active order IDs
+     * @return Array of active order IDs
+     */
+    function getActiveOrders() external view returns (uint256[] memory) {
+        uint256 activeCount = 0;
+        
+        // Count active orders
+        for (uint256 i = 0; i < orderIds.length; i++) {
+            if (stopOrders[orderIds[i]].status == OrderStatus.Active) {
+                activeCount++;
+            }
+        }
+        
+        // Build active orders array
+        uint256[] memory activeOrders = new uint256[](activeCount);
+        uint256 index = 0;
+        
+        for (uint256 i = 0; i < orderIds.length; i++) {
+            if (stopOrders[orderIds[i]].status == OrderStatus.Active) {
+                activeOrders[index] = orderIds[i];
+                index++;
+            }
+        }
+        
+        return activeOrders;
     }
     
     /**
@@ -348,60 +364,118 @@ contract StopOrderCallback is AbstractCallback {
         }
     }
     
-    // Internal functions
-    // SOLUTIONS:
-// 1. Use require() instead of try/catch
-// 2. Follow proven pattern: swap to contract first, then transfer
-// 3. Simple, reliable error handling
+    /**
+     * @notice Internal function to execute the swap
+     * @param order The order to execute
+     * @param amount The amount to swap
+     * @return success Whether the swap was successful
+     * @return amountOut The amount of tokens received
+     */
+    function _executeSwap(StopOrder memory order, uint256 amount) internal returns (bool success, uint256 amountOut) {
+        try this._performSwap(order.tokenSell, order.tokenBuy, amount) returns (uint256 _amountOut) {
+            return (true, _amountOut);
+        } catch {
+            return (false, 0);
+        }
+    }
+    
+    /**
+     * @notice External function for swap execution (used internally with try/catch)
+     * @param tokenSell Token to sell
+     * @param tokenBuy Token to buy
+     * @param amount Amount to swap
+     * @return amountOut Amount received
+     */
+    function _performSwap(
+        address tokenSell,
+        address tokenBuy,
+        uint256 amount
+    ) external returns (uint256 amountOut) {
+        require(msg.sender == address(this), "Internal function only");
+        
+        // Step 1: Transfer tokens from owner to contract
+        require(IERC20(tokenSell).transferFrom(owner, address(this), amount), "Transfer failed");
+        
+        // Step 2: Approve router
+        require(IERC20(tokenSell).approve(address(router), amount), "Approval failed");
+        
+        // Step 3: Execute swap to contract first
+        address[] memory path = new address[](2);
+        path[0] = tokenSell;
+        path[1] = tokenBuy;
+        
+        uint256[] memory amounts = router.swapExactTokensForTokens(
+            amount,
+            0,
+            path,
+            address(this),
+            block.timestamp + DEADLINE_OFFSET
+        );
+        
+        // Step 4: Transfer received tokens to owner
+        amountOut = amounts[1];
+        require(IERC20(tokenBuy).transfer(owner, amountOut), "Final transfer failed");
+        
+        return amountOut;
+    }
+    
+    /**
+     * @notice Checks if the current on-chain price is below the order's threshold
+     * @param sellToken0 True if selling token0, false if selling token1
+     * @param reserve0 The reserve of token0 in the pair
+     * @param reserve1 The reserve of token1 in the pair
+     * @param coefficient The price coefficient from the order
+     * @param threshold The price threshold from the order
+     * @return True if the price condition is met, false otherwise
+     */
+    function _isBelowThreshold(
+        bool sellToken0,
+        uint112 reserve0,
+        uint112 reserve1,
+        uint256 coefficient,
+        uint256 threshold
+    ) internal pure returns (bool) {
+        if (sellToken0) {
+            // Price of token0 in terms of token1
+            return (uint256(reserve1) * coefficient) / uint256(reserve0) <= threshold;
+        } else {
+            // Price of token1 in terms of token0
+            return (uint256(reserve0) * coefficient) / uint256(reserve1) <= threshold;
+        }
+    }
+    
+    /**
+     * @notice Emergency function to recover any stuck tokens
+     * @param token Token address to recover
+     * @param amount Amount to recover (0 for full balance)
+     */
+    function emergencyRecoverToken(address token, uint256 amount) external onlyOwner {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        uint256 recoverAmount = amount == 0 ? balance : amount;
+        require(recoverAmount <= balance, "Insufficient balance to recover");
+        require(IERC20(token).transfer(owner, recoverAmount), "Recovery transfer failed");
+    }
 
-function _executeSwap(StopOrder memory order, uint256 amount) internal returns (bool) {
-    address tokenSell = order.tokenSell;
-    address tokenBuy = order.tokenBuy;
-    address client = order.client;
-    
-    // Validate first
-    uint256 clientBalance = IERC20(tokenSell).balanceOf(client);
-    if (clientBalance < amount) return false;
-    
-    uint256 allowance = IERC20(tokenSell).allowance(client, address(this));
-    if (allowance < amount) return false;
-    
-    // Step 1: Transfer tokens from client to contract
-    require(IERC20(tokenSell).transferFrom(client, address(this), amount), "Transfer failed");
-    
-    // Step 2: Approve router
-    require(IERC20(tokenSell).approve(address(router), amount), "Approval failed");
-    
-    // Step 3: Execute swap TO CONTRACT FIRST
-    address[] memory path = new address[](2);
-    path[0] = tokenSell;
-    path[1] = tokenBuy;
-    
-    uint256[] memory amounts = router.swapExactTokensForTokens(
-        amount,
-        0,
-        path,
-        address(this), // ✅ SOLUTION: Receive at contract first
-        block.timestamp + DEADLINE_OFFSET
-    );
-    
-    // Step 4: Transfer received tokens to client
-    uint256 amountOut = amounts[1];
-    require(IERC20(tokenBuy).transfer(client, amountOut), "Final transfer failed");
-    
-    return true;
-}
-    
+    // Emergency withdrawal functions - only deployer can call
+    function withdrawETH(address payable to, uint256 amount) external onlyOwner {
+        require(to != address(0), "Invalid recipient address");
+        require(amount <= address(this).balance, "Insufficient ETH balance");
+        
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "ETH transfer failed");
+        
+        emit ETHWithdrawn(to, amount);
+    }
 
-    // The RSC is our single source of truth for price conditions
-    
-    // Emergency functions
-    function withdrawETH() external {
-        require(msg.sender == tx.origin, "Only EOA can withdraw"); // Simple access control
+
+    function withdrawAllETH(address payable to) external onlyOwner {
+        require(to != address(0), "Invalid recipient address");
         uint256 balance = address(this).balance;
         require(balance > 0, "No ETH to withdraw");
         
-        (bool success,) = msg.sender.call{value: balance}("");
+        (bool success, ) = to.call{value: balance}("");
         require(success, "ETH transfer failed");
+        
+        emit ETHWithdrawn(to, balance);
     }
 }

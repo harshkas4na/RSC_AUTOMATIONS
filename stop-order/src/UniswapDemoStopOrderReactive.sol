@@ -4,12 +4,16 @@ pragma solidity >=0.8.0;
 import "../lib/reactive-lib/src/interfaces/IReactive.sol";
 import "../lib/reactive-lib/src/abstract-base/AbstractReactive.sol";
 
-contract StopOrderReactive is IReactive, AbstractReactive {
+/**
+ * @title PersonalStopOrderReactive
+ * @notice Personal reactive smart contract for monitoring stop orders
+ * @dev Each user deploys their own instance paired with PersonalStopOrderCallback
+ */
+contract PersonalStopOrderReactive is IReactive, AbstractReactive {
     // Events
     event OrderTracked(
         address indexed pair,
-        uint256 indexed orderId,
-        address indexed client
+        uint256 indexed orderId
     );
     
     event OrderUntracked(
@@ -36,7 +40,6 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         uint256 orderId
     );
     
-    // Added debug event to see exact threshold calculations
     event ThresholdCheck(
         uint256 indexed orderId,
         uint256 calculated,
@@ -49,11 +52,11 @@ contract StopOrderReactive is IReactive, AbstractReactive {
     uint256 private constant SEPOLIA_CHAIN_ID = 11155111;
     uint256 private constant REACTIVE_CHAIN_ID = 5318007; // Lasna network chain ID
     uint256 private constant UNISWAP_V2_SYNC_TOPIC_0 = 0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1;
-    uint256 private constant STOP_ORDER_CREATED_TOPIC_0 = 0x9b04d9cf86fd3b602bd071c32af665e7d3937a1e5b1b9cf1dd38a8343b595b2a; // keccak256("StopOrderCreated(address,uint256,address,bool,address,address,uint256,uint256,uint256)")
-    uint256 private constant STOP_ORDER_CANCELLED_TOPIC_0 = 0xfe37e6bb58b8cd2f910ea053f64bb539b39cc1c88a576a320b59bcbf4f339dfc; // keccak256("StopOrderCancelled(uint256,address)")
-    uint256 private constant STOP_ORDER_EXECUTED_TOPIC_0 = 0x2a5962540e657deb5eb7f9238cc31815325d1e74cf8e6415ea3d7a5b9886997d; // keccak256("StopOrderExecuted(address,uint256,address,address,address,uint256,uint256)")
-    uint256 private constant STOP_ORDER_PAUSED_TOPIC_0 = 0x552b2dd798eedf0c450199b5a7c35ff9f2955c113876b1afbe87060335b31653; // keccak256("StopOrderPaused(uint256,address)")
-    uint256 private constant STOP_ORDER_RESUMED_TOPIC_0 = 0x9bffe4738606691ddfa5e5d28208b6ef74537676b39ddb9854b7854a62df0692; // keccak256("StopOrderResumed(uint256,address)")
+    uint256 private constant STOP_ORDER_CREATED_TOPIC_0 = 0xa7f61b1e84fe442fec0d745e46c5a14ab1c4968a656ee865764da4155e15b15f; // keccak256("StopOrderCreated(address,uint256,bool,address,address,uint256,uint256,uint256)")
+    uint256 private constant STOP_ORDER_CANCELLED_TOPIC_0 = 0xad9e9b6169c70ec1a50cf90107a9621b005376a3aa8662130d414a541693149d; // keccak256("StopOrderCancelled(uint256)")
+    uint256 private constant STOP_ORDER_EXECUTED_TOPIC_0 = 0x90979f4e8ed6baf430ca253822dfbd281b8d2c27d7a5121b484b4bfcaca4297f; // keccak256("StopOrderExecuted(address,uint256,address,address,uint256,uint256)")
+    uint256 private constant STOP_ORDER_PAUSED_TOPIC_0 = 0x7c070b2e9334d802a093c6b4a80f124bf4ffc8a9af89d0dae72ab22309f96889; // keccak256("StopOrderPaused(uint256)")
+    uint256 private constant STOP_ORDER_RESUMED_TOPIC_0 = 0x310f8f7e10ddae556ab6ef7c362667de2c95fad69956c224c16aa058755669a7; // keccak256("StopOrderResumed(uint256)")
     uint64 private constant CALLBACK_GAS_LIMIT = 1000000;
     
     // Order status enum (mirrors the callback contract)
@@ -69,7 +72,6 @@ contract StopOrderReactive is IReactive, AbstractReactive {
     struct TrackedOrder {
         uint256 id;
         address pair;
-        address client;
         bool sellToken0;
         uint256 coefficient;
         uint256 threshold;
@@ -79,7 +81,8 @@ contract StopOrderReactive is IReactive, AbstractReactive {
     }
     
     // State variables
-    address private stopOrderCallback;
+    address public immutable owner;
+    address public immutable stopOrderCallback;
     
     // Order tracking
     mapping(uint256 => TrackedOrder) private trackedOrders;
@@ -91,11 +94,20 @@ contract StopOrderReactive is IReactive, AbstractReactive {
     uint256 private constant TRIGGER_COOLDOWN = 300; // 5 minutes between triggers
     uint8 private constant MAX_TRIGGER_ATTEMPTS = 5;
     
-    constructor(address _stopOrderCallback) payable {
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this");
+        _;
+    }
+    
+    constructor(
+        address _owner,
+        address _stopOrderCallback
+    ) payable {
+        owner = _owner;
         stopOrderCallback = _stopOrderCallback;
         
         if (!vm) {
-            // Subscribe to stop order lifecycle events
+            // Subscribe to stop order lifecycle events from the personal callback contract
             service.subscribe(
                 SEPOLIA_CHAIN_ID,
                 stopOrderCallback,
@@ -172,7 +184,6 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         // Extract data from event topics
         address pair = address(uint160(log.topic_1));
         uint256 orderId = uint256(log.topic_2);
-        address client = address(uint160(log.topic_3));
         
         // Decode additional data from log.data
         (
@@ -188,7 +199,6 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         trackedOrders[orderId] = TrackedOrder({
             id: orderId,
             pair: pair,
-            client: client,
             sellToken0: sellToken0,
             coefficient: coefficient,
             threshold: threshold,
@@ -200,20 +210,19 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         // Add to pair's order list
         pairOrders[pair].push(orderId);
         
-        // Subscribe to pair if this is the first order - USING CALLBACK MECHANISM
+        // Subscribe to pair if this is the first order
         if (pairOrderCount[pair] == 0) {
             _requestPairSubscription(pair, log.chain_id);
         }
         
         pairOrderCount[pair]++;
         
-        emit OrderTracked(pair, orderId, client);
+        emit OrderTracked(pair, orderId);
     }
     
     // Process order cancellation
     function _processOrderCancelled(LogRecord calldata log) internal {
         uint256 orderId = uint256(log.topic_1);
-        address client = address(uint160(log.topic_2));
         
         if (trackedOrders[orderId].id == orderId) {
             address pair = trackedOrders[orderId].pair;
@@ -257,7 +266,7 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         }
     }
     
-    // Process Uniswap sync events - THE CORE LOGIC
+    // Process Uniswap sync events - Core monitoring logic
     function _processSyncEvent(LogRecord calldata log) internal {
         address pair = log._contract;
         Reserves memory reserves = abi.decode(log.data, (Reserves));
@@ -287,7 +296,7 @@ contract StopOrderReactive is IReactive, AbstractReactive {
                 continue;
             }
             
-            // Check if price condition is met - THIS IS THE ONLY PLACE!
+            // Check if price condition is met
             bool shouldTrigger = _isPriceConditionMet(
                 order.sellToken0,
                 reserves,
@@ -311,7 +320,7 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         }
     }
     
-    // Check if price condition is met - THE AUTHORITATIVE CHECK
+    // Check if price condition is met
     function _isPriceConditionMet(
         bool sellToken0,
         Reserves memory reserves,
@@ -346,8 +355,6 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         emit ExecutionTriggered(orderId, pair, true);
     }
     
-    // DYNAMIC SUBSCRIPTION MANAGEMENT USING CALLBACK MECHANISM
-    
     // Request pair subscription using callback mechanism
     function _requestPairSubscription(address pair, uint256 chainId) internal {
         if (!subscribedPairs[pair]) {
@@ -362,7 +369,7 @@ contract StopOrderReactive is IReactive, AbstractReactive {
             // Emit callback to Reactive Network to handle the subscription
             emit Callback(REACTIVE_CHAIN_ID, address(this), CALLBACK_GAS_LIMIT, payload);
             
-            // Mark as requested (will be confirmed when subscription is active)
+            // Mark as requested
             subscribedPairs[pair] = true;
             emit PairSubscribed(pair);
         }
@@ -382,7 +389,7 @@ contract StopOrderReactive is IReactive, AbstractReactive {
             // Emit callback to Reactive Network to handle the unsubscription
             emit Callback(REACTIVE_CHAIN_ID, address(this), CALLBACK_GAS_LIMIT, payload);
             
-            // Mark as requested (will be confirmed when unsubscription is processed)
+            // Mark as requested
             subscribedPairs[pair] = false;
             emit PairUnsubscribed(pair);
         }
@@ -426,6 +433,34 @@ contract StopOrderReactive is IReactive, AbstractReactive {
         }
     }
     
+    // Emergency function to manually force subscription (owner only)
+    function emergencySubscribeToPair(address pair, uint256 chainId) external onlyOwner {
+        service.subscribe(
+            chainId,
+            pair,
+            UNISWAP_V2_SYNC_TOPIC_0,
+            REACTIVE_IGNORE,
+            REACTIVE_IGNORE,
+            REACTIVE_IGNORE
+        );
+        subscribedPairs[pair] = true;
+        emit PairSubscribed(pair);
+    }
+    
+    // Emergency function to manually force unsubscription (owner only)
+    function emergencyUnsubscribeFromPair(address pair, uint256 chainId) external onlyOwner {
+        service.unsubscribe(
+            chainId,
+            pair,
+            UNISWAP_V2_SYNC_TOPIC_0,
+            REACTIVE_IGNORE,
+            REACTIVE_IGNORE,
+            REACTIVE_IGNORE
+        );
+        subscribedPairs[pair] = false;
+        emit PairUnsubscribed(pair);
+    }
+    
     // View functions
     function getTrackedOrder(uint256 orderId) external view returns (TrackedOrder memory) {
         return trackedOrders[orderId];
@@ -441,5 +476,50 @@ contract StopOrderReactive is IReactive, AbstractReactive {
     
     function getPairOrders(address pair) external view returns (uint256[] memory) {
         return pairOrders[pair];
+    }
+    
+    function getActiveOrdersForPair(address pair) external view returns (uint256[] memory) {
+        uint256[] storage allOrders = pairOrders[pair];
+        uint256 activeCount = 0;
+        
+        // Count active orders
+        for (uint256 i = 0; i < allOrders.length; i++) {
+            if (trackedOrders[allOrders[i]].status == OrderStatus.Active) {
+                activeCount++;
+            }
+        }
+        
+        // Build active orders array
+        uint256[] memory activeOrders = new uint256[](activeCount);
+        uint256 index = 0;
+        
+        for (uint256 i = 0; i < allOrders.length; i++) {
+            if (trackedOrders[allOrders[i]].status == OrderStatus.Active) {
+                activeOrders[index] = allOrders[i];
+                index++;
+            }
+        }
+        
+        return activeOrders;
+    }
+    // Emergency withdrawal functions - only deployer can call
+    function withdrawETH(address payable to, uint256 amount) external onlyOwner {
+        require(to != address(0), "Invalid recipient address");
+        require(amount <= address(this).balance, "Insufficient ETH balance");
+        
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "ETH transfer failed");
+        
+    }
+
+
+    function withdrawAllETH(address payable to) external onlyOwner {
+        require(to != address(0), "Invalid recipient address");
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to withdraw");
+        
+        (bool success, ) = to.call{value: balance}("");
+        require(success, "ETH transfer failed");
+        
     }
 }
